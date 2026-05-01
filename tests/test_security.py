@@ -16,6 +16,8 @@ from graphify.security import (
     validate_url,
     _MAX_FETCH_BYTES,
     _MAX_TEXT_BYTES,
+    _MAX_TEXT_BYTES_HARD_CAP,
+    _resolved_text_max_bytes,
 )
 
 
@@ -155,6 +157,36 @@ def test_safe_fetch_text_replaces_bad_bytes():
     assert "hello" in result
     assert "world" in result
     assert "\xff" not in result
+
+
+# ---------------------------------------------------------------------------
+# safe_fetch_text - default cap and GRAPHIFY_MAX_TEXT_BYTES override
+# ---------------------------------------------------------------------------
+
+def test_safe_fetch_text_default_cap_is_2_mb():
+    assert _MAX_TEXT_BYTES == 2_097_152
+
+def test_resolved_text_max_bytes_unset_returns_default(monkeypatch):
+    monkeypatch.delenv("GRAPHIFY_MAX_TEXT_BYTES", raising=False)
+    assert _resolved_text_max_bytes() == _MAX_TEXT_BYTES
+
+def test_resolved_text_max_bytes_env_override(monkeypatch):
+    monkeypatch.setenv("GRAPHIFY_MAX_TEXT_BYTES", "1048576")  # 1 MB
+    assert _resolved_text_max_bytes() == 1_048_576
+
+def test_resolved_text_max_bytes_clamps_to_50_mb(monkeypatch):
+    monkeypatch.setenv("GRAPHIFY_MAX_TEXT_BYTES", "104857600")  # 100 MB
+    assert _resolved_text_max_bytes() == _MAX_TEXT_BYTES_HARD_CAP == 52_428_800
+
+def test_resolved_text_max_bytes_rejects_malformed(monkeypatch):
+    monkeypatch.setenv("GRAPHIFY_MAX_TEXT_BYTES", "ten-megabytes")
+    with pytest.raises(ValueError, match="positive integer"):
+        _resolved_text_max_bytes()
+
+def test_resolved_text_max_bytes_rejects_non_positive(monkeypatch):
+    monkeypatch.setenv("GRAPHIFY_MAX_TEXT_BYTES", "0")
+    with pytest.raises(ValueError, match="positive integer"):
+        _resolved_text_max_bytes()
 
 
 # ---------------------------------------------------------------------------

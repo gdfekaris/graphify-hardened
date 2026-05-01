@@ -15,10 +15,35 @@ import socket
 
 _ALLOWED_SCHEMES = {"http", "https"}
 _MAX_FETCH_BYTES = 52_428_800   # 50 MB hard cap for binary downloads
-_MAX_TEXT_BYTES  = 10_485_760   # 10 MB hard cap for HTML / text
+_MAX_TEXT_BYTES  = 2_097_152    # 2 MB default for HTML / text
+_MAX_TEXT_BYTES_HARD_CAP = 52_428_800  # 50 MB ceiling for env-var override
 
 # AWS metadata, link-local, and common cloud metadata endpoints
 _BLOCKED_HOSTS = {"metadata.google.internal", "metadata.google.com"}
+
+
+def _resolved_text_max_bytes() -> int:
+    """Return the effective text-fetch cap, honoring GRAPHIFY_MAX_TEXT_BYTES.
+
+    Falls back to _MAX_TEXT_BYTES (2 MB) when unset. A user-supplied value is
+    clamped at _MAX_TEXT_BYTES_HARD_CAP (50 MB). Malformed or non-positive
+    values raise ValueError so misconfiguration surfaces immediately rather
+    than silently using the default.
+    """
+    raw = os.environ.get("GRAPHIFY_MAX_TEXT_BYTES")
+    if raw is None:
+        return _MAX_TEXT_BYTES
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"GRAPHIFY_MAX_TEXT_BYTES must be a positive integer, got {raw!r}"
+        ) from exc
+    if value <= 0:
+        raise ValueError(
+            f"GRAPHIFY_MAX_TEXT_BYTES must be a positive integer, got {raw!r}"
+        )
+    return min(value, _MAX_TEXT_BYTES_HARD_CAP)
 
 
 def _fetch_allowlist() -> set[str] | None:
@@ -183,11 +208,15 @@ def safe_fetch(url: str, max_bytes: int = _MAX_FETCH_BYTES, timeout: int = 30) -
     return b"".join(chunks)
 
 
-def safe_fetch_text(url: str, max_bytes: int = _MAX_TEXT_BYTES, timeout: int = 15) -> str:
+def safe_fetch_text(url: str, max_bytes: int | None = None, timeout: int = 15) -> str:
     """Fetch *url* and return decoded text (UTF-8, replacing bad bytes).
 
-    Wraps safe_fetch with tighter defaults for HTML / text content.
+    Wraps safe_fetch with tighter defaults for HTML / text content. When
+    *max_bytes* is None, the cap is taken from GRAPHIFY_MAX_TEXT_BYTES (or
+    the 2 MB default). An explicit *max_bytes* argument always wins.
     """
+    if max_bytes is None:
+        max_bytes = _resolved_text_max_bytes()
     raw = safe_fetch(url, max_bytes=max_bytes, timeout=timeout)
     return raw.decode("utf-8", errors="replace")
 

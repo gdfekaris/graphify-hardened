@@ -24,8 +24,10 @@ from __future__ import annotations
 import json
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 import networkx as nx
+from .injection import flag_suspicious
 from .validate import validate_extraction
 
 
@@ -79,11 +81,85 @@ def _merge_provenance(*lists: list[str]) -> list[str]:
     return result
 
 
-def build_from_json(extraction: dict, *, directed: bool = False) -> nx.Graph:
+# Free-text node fields that pass through the prompt-injection heuristics
+# before the node enters the graph. Keep this list in sync with any new
+# corpus-derived fields added to the extraction schema.
+_QUARANTINED_FIELDS: tuple[str, ...] = ("label", "rationale", "summary")
+_FLAGGED_PLACEHOLDER = "[FLAGGED — see graphify-out/.flagged.json]"
+_DEFAULT_FLAGGED_LOG = "graphify-out/.flagged.json"
+
+
+def _quarantine_node(node: dict, log_path: Path | None) -> bool:
+    """Redact and log any free-text fields on `node` that match the
+    prompt-injection heuristics. Mutates `node` in place. Returns True if
+    any field was flagged.
+
+    When ``log_path`` is None, redaction still happens but no record is
+    written — used by tests that want pure in-memory behaviour.
+    """
+    flagged_records: list[dict] = []
+    for field in _QUARANTINED_FIELDS:
+        value = node.get(field)
+        if not isinstance(value, str) or not value:
+            continue
+        if value == _FLAGGED_PLACEHOLDER:
+            # Already redacted on a prior build (e.g. graph.json round-trip
+            # via build_merge). Skip to avoid double-logging the placeholder.
+            continue
+        matched = flag_suspicious(value)
+        if not matched:
+            continue
+        flagged_records.append({
+            "node_id": node.get("id"),
+            "field_name": field,
+            "original_text": value,
+            "matched_patterns": matched,
+            "provenance": _derive_provenance(node),
+            "ts": datetime.now(timezone.utc).isoformat(),
+        })
+        node[field] = _FLAGGED_PLACEHOLDER
+
+    if not flagged_records:
+        return False
+
+    node["flagged"] = True
+    if log_path is not None:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as f:
+            for record in flagged_records:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return True
+
+
+def _resolve_log_path(flagged_log_path: str | Path | None) -> Path | None:
+    """Translate the public ``flagged_log_path`` arg into a Path or None.
+
+    None means "do not write" — redaction-only mode. Anything else is
+    coerced to Path, with the default constant supplying the canonical
+    ``graphify-out/.flagged.json`` location.
+    """
+    if flagged_log_path is None:
+        return None
+    return Path(flagged_log_path)
+
+
+def build_from_json(
+    extraction: dict,
+    *,
+    directed: bool = False,
+    flagged_log_path: str | Path | None = _DEFAULT_FLAGGED_LOG,
+) -> nx.Graph:
     """Build a NetworkX graph from an extraction dict.
 
     directed=True produces a DiGraph that preserves edge direction (source→target).
     directed=False (default) produces an undirected Graph for backward compatibility.
+
+    Every node passes through the Phase 3 prompt-injection quarantine before
+    entering the graph: any free-text field matching the heuristics in
+    ``graphify.injection`` is redacted, the node is tagged ``flagged: True``,
+    and the original content is appended to ``flagged_log_path``. Pass
+    ``flagged_log_path=None`` to suppress the side-effect write (used by
+    tests and the in-memory APIs).
     """
     # NetworkX <= 3.1 serialised edges as "links"; remap to "edges" for compatibility.
     if "edges" not in extraction and "links" in extraction:
@@ -111,6 +187,22 @@ def build_from_json(extraction: dict, *, directed: bool = False) -> nx.Graph:
     real_errors = [e for e in errors if "does not match any node id" not in e]
     if real_errors:
         print(f"[graphify] Extraction warning ({len(real_errors)} issues): {real_errors[0]}", file=sys.stderr)
+
+    # Quarantine pass — runs before graph assembly so flagged content
+    # never reaches export, report, or MCP-visible state.
+    log_path = _resolve_log_path(flagged_log_path)
+    quarantined = 0
+    for node in extraction.get("nodes", []):
+        if isinstance(node, dict) and _quarantine_node(node, log_path):
+            quarantined += 1
+    if quarantined:
+        target = log_path if log_path is not None else "(in-memory only)"
+        print(
+            f"[graphify] SECURITY: quarantined {quarantined} node(s) with "
+            f"flagged content. See {target}",
+            file=sys.stderr,
+        )
+
     G: nx.Graph = nx.DiGraph() if directed else nx.Graph()
     for node in extraction.get("nodes", []):
         nid = node["id"]
@@ -154,7 +246,12 @@ def build_from_json(extraction: dict, *, directed: bool = False) -> nx.Graph:
     return G
 
 
-def build(extractions: list[dict], *, directed: bool = False) -> nx.Graph:
+def build(
+    extractions: list[dict],
+    *,
+    directed: bool = False,
+    flagged_log_path: str | Path | None = _DEFAULT_FLAGGED_LOG,
+) -> nx.Graph:
     """Merge multiple extraction results into one graph.
 
     directed=True produces a DiGraph that preserves edge direction (source→target).
@@ -172,7 +269,7 @@ def build(extractions: list[dict], *, directed: bool = False) -> nx.Graph:
         combined["hyperedges"].extend(ext.get("hyperedges", []))
         combined["input_tokens"] += ext.get("input_tokens", 0)
         combined["output_tokens"] += ext.get("output_tokens", 0)
-    return build_from_json(combined, directed=directed)
+    return build_from_json(combined, directed=directed, flagged_log_path=flagged_log_path)
 
 
 def _norm_label(label: str) -> str:
@@ -239,6 +336,7 @@ def build_merge(
     prune_sources: list[str] | None = None,
     *,
     directed: bool = False,
+    flagged_log_path: str | Path | None = _DEFAULT_FLAGGED_LOG,
 ) -> nx.Graph:
     """Load existing graph.json, merge new chunks into it, and save back.
 
@@ -264,7 +362,7 @@ def build_merge(
         base = []
 
     all_chunks = base + list(new_chunks)
-    G = build(all_chunks, directed=directed)
+    G = build(all_chunks, directed=directed, flagged_log_path=flagged_log_path)
 
     # Prune nodes from deleted source files
     if prune_sources:

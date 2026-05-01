@@ -5,11 +5,22 @@ import json
 import math
 import re
 from collections import Counter
+from importlib import resources
 from pathlib import Path
 import networkx as nx
 from networkx.readwrite import json_graph
 from graphify.security import sanitize_label
 from graphify.analyze import _node_community_map
+
+
+def _load_vis_network_js() -> str:
+    js = resources.files("graphify").joinpath("static/vis-network.min.js").read_text(encoding="utf-8")
+    if "</script" in js.lower():
+        raise RuntimeError(
+            "Vendored vis-network bundle contains '</script' — refusing to inline. "
+            "Re-pin to a version without this substring or escape before embedding."
+        )
+    return js
 
 def _strip_diacritics(text: str) -> str:
     import unicodedata
@@ -471,7 +482,7 @@ def to_html(
 <head>
 <meta charset="UTF-8">
 <title>graphify - {title}</title>
-<script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+<script>{_load_vis_network_js()}</script>
 {_html_styles()}
 </head>
 <body>

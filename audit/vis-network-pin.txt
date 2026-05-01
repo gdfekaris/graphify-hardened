@@ -1,0 +1,53 @@
+vis-network vendoring decision and pin
+========================================
+
+Recorded: 2026-05-01
+Plan tasks: 2.1 (decision), 2.2 (version + hash)
+
+Task 2.1 — Vendoring strategy
+-----------------------------
+Decision: INLINE (vendor the JS into graphify/static/, embed it in every
+generated graph.html via importlib.resources). Selected for the strongest
+security posture: self-contained output, works offline, no third-party
+runtime trust, no CDN-tampering risk.
+
+SRI-with-CDN was considered and rejected: a tampered CDN response would
+fail closed (browser blocks the script) but would also break the graph
+viewer; inline avoids both the trust dependency and the failure mode.
+
+Task 2.2 — Pinned version and integrity
+---------------------------------------
+Package:        vis-network
+Version:        10.0.2
+Released:       2025-09-15 (GitHub tag v10.0.2)
+File:           standalone/umd/vis-network.min.js (from npm tarball)
+Size (bytes):   644509
+
+SHA-384 (base64, SRI form):
+  m/pqkSdIs50f1nWlv062s9HmCAygFne+xY7uot2M8ZVijdcC+c/n97dFCfAZnKwO
+
+SHA-384 (hex):
+  9bfa6a912748b39d1fd675a5bf4eb6b3d1e6080ca01677bec58eeea2dd8cf1956
+  28dd702f9cfe7f7b74509f0199cac0e
+
+SHA-256 (hex):
+  92a2603c7125a249f1b61f3c3a316b4041ef47b32f4433484e3471f140f91485
+
+Source of truth and provenance
+------------------------------
+The GitHub release at https://github.com/visjs/vis-network/releases/tag/v10.0.2
+has no attached binary assets — vis-network distributes the built JS
+exclusively through npm. npm registry metadata is therefore the
+authoritative published artifact for this version.
+
+Tarball downloaded:
+  https://registry.npmjs.org/vis-network/-/vis-network-10.0.2.tgz
+
+Tarball integrity verified against npm registry metadata before extraction:
+  Published dist.shasum    (sha1 hex):    cf8ea2c6a06d32612d90c1aac14def1432112484
+  Published dist.integrity (sha512 b64):  qPl8GLYBeHEFqiTqp4VBbYQIJ2EA8KLr7TstA2E8nJxfEHaKCU81hQLz7hhq11NUpHbMaRzBjW5uZpVKJ45/wA==
+
+Both values matched bytes-on-disk via `openssl dgst` before
+`package/standalone/umd/vis-network.min.js` was extracted from the
+tarball, so the hash above is bound to the npm-published artifact for
+vis-network@10.0.2.

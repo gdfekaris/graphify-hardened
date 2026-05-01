@@ -11,29 +11,29 @@ license = { file = "LICENSE" }
 keywords = ["claude", "claude-code", "codex", "opencode", "cursor", "gemini", "aider", "kiro", "knowledge-graph", "rag", "graphrag", "obsidian", "community-detection", "tree-sitter", "leiden", "llm"]
 requires-python = ">=3.10"
 dependencies = [
-    "networkx",
-    "tree-sitter>=0.23.0",
-    "tree-sitter-python",
-    "tree-sitter-javascript",
-    "tree-sitter-typescript",
-    "tree-sitter-go",
-    "tree-sitter-rust",
-    "tree-sitter-java",
-    "tree-sitter-c",
-    "tree-sitter-cpp",
-    "tree-sitter-ruby",
-    "tree-sitter-c-sharp",
-    "tree-sitter-kotlin",
-    "tree-sitter-scala",
-    "tree-sitter-php",
-    "tree-sitter-swift",
-    "tree-sitter-lua",
-    "tree-sitter-zig",
-    "tree-sitter-powershell",
-    "tree-sitter-elixir",
-    "tree-sitter-objc",
-    "tree-sitter-julia",
-    "tree-sitter-verilog",
+    "networkx>=3.4.2,<4",
+    "tree-sitter>=0.23.0,<1",
+    "tree-sitter-python==0.25.0",
+    "tree-sitter-javascript==0.25.0",
+    "tree-sitter-typescript==0.23.2",
+    "tree-sitter-go==0.25.0",
+    "tree-sitter-rust==0.24.2",
+    "tree-sitter-java==0.23.5",
+    "tree-sitter-c==0.24.2",
+    "tree-sitter-cpp==0.23.4",
+    "tree-sitter-ruby==0.23.1",
+    "tree-sitter-c-sharp==0.23.5",
+    "tree-sitter-kotlin==1.1.0",
+    "tree-sitter-scala==0.26.0",
+    "tree-sitter-php==0.24.1",
+    "tree-sitter-swift==0.0.1",
+    "tree-sitter-lua==0.5.0",
+    "tree-sitter-zig==1.1.2",
+    "tree-sitter-powershell==0.26.3",
+    "tree-sitter-elixir==0.3.5",
+    "tree-sitter-objc==3.0.2",
+    "tree-sitter-julia==0.23.1",
+    "tree-sitter-verilog==1.0.3",
 ]
 
 [project.urls]
@@ -42,13 +42,22 @@ Repository = "https://github.com/safishamsi/graphify"
 Issues = "https://github.com/safishamsi/graphify/issues"
 
 [project.optional-dependencies]
-mcp = ["mcp"]
-pdf = ["pypdf", "html2text"]
-watch = ["watchdog"]
-svg = ["matplotlib"]
-leiden = ["graspologic; python_version < '3.13'"]
-office = ["python-docx", "openpyxl"]
-all = ["mcp", "pypdf", "html2text", "watchdog", "graspologic; python_version < '3.13'", "python-docx", "openpyxl", "matplotlib"]
+mcp = ["mcp>=1.27.0,<2"]
+pdf = ["pypdf>=6.10.2,<7", "html2text>=2025.4.15,<2026"]
+watch = ["watchdog>=6.0.0,<7"]
+svg = ["matplotlib>=3.10.9,<4"]
+leiden = ["graspologic>=3.4.4,<4; python_version < '3.13'"]
+office = ["python-docx>=1.2.0,<2", "openpyxl>=3.1.5,<4"]
+all = [
+    "mcp>=1.27.0,<2",
+    "pypdf>=6.10.2,<7",
+    "html2text>=2025.4.15,<2026",
+    "watchdog>=6.0.0,<7",
+    "graspologic>=3.4.4,<4; python_version < '3.13'",
+    "python-docx>=1.2.0,<2",
+    "openpyxl>=3.1.5,<4",
+    "matplotlib>=3.10.9,<4",
+]
 
 [project.scripts]
 graphify = "graphify.__main__:main"

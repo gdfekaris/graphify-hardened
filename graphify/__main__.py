@@ -965,29 +965,127 @@ def claude_uninstall(project_dir: Path | None = None) -> None:
     _uninstall_claude_hook(project_dir or Path("."))
 
 
+# Owner/repo character allowlist (per Task 4.4 spec). The same regex would
+# also let through "." or ".." which would let a crafted URL traverse out of
+# the cache directory, so we additionally reject names that are pure dots.
+_GIT_NAME_RE = re.compile(r"^[a-zA-Z0-9._-]+$")
+# Host character allowlist — DNS labels plus dot/hyphen.
+_GIT_HOST_RE = re.compile(r"^[a-zA-Z0-9.-]+$")
+# SCP-like git URL: user@host:path (no scheme prefix). Disallows whitespace,
+# colons in user/host, and slashes in user/host so the colon split is unambiguous.
+_GIT_SCP_RE = re.compile(r"^[^@\s:/]+@([^@:\s/]+):(.+)$")
+
+
+def _parse_git_url(url: str) -> dict[str, str]:
+    """Parse a git remote URL into ``{scheme, host, owner, repo}``.
+
+    Accepts:
+      - ``https://host/owner/repo[.git]`` (and ``http://``)
+      - ``ssh://git@host[:port]/owner/repo[.git]`` (and ``git://``)
+      - ``git@host:owner/repo[.git]`` (SCP-like)
+
+    Rejects anything that does not parse cleanly. ``owner`` and ``repo`` are
+    required to match ``^[a-zA-Z0-9._-]+$`` and must not be ``.`` or ``..``,
+    so a crafted URL cannot smuggle path-traversal segments or shell
+    metacharacters into either the cache directory or a future subprocess
+    argv (defence in depth — subprocess is invoked with ``shell=False``).
+    """
+    if not isinstance(url, str) or not url.strip():
+        raise ValueError(f"empty or non-string git URL: {url!r}")
+
+    raw = url.strip().rstrip("/")
+
+    if "://" in raw:
+        import urllib.parse as _up
+        # urlsplit, not urlparse: urlparse strips ";params" from the path for
+        # HTTP/HTTPS, which would let "https://h/owner/repo;rm -rf /" slip
+        # through with path=/owner/repo and the metacharacters smuggled into
+        # the params field that we never inspect. urlsplit keeps them in path.
+        parsed = _up.urlsplit(raw)
+        scheme = parsed.scheme.lower()
+        if scheme not in {"https", "http", "ssh", "git"}:
+            raise ValueError(f"unsupported git URL scheme {scheme!r}: {url!r}")
+        host = parsed.hostname or ""
+        path = parsed.path or ""
+        if parsed.query or parsed.fragment:
+            raise ValueError(f"git URL must not contain query or fragment: {url!r}")
+    else:
+        m = _GIT_SCP_RE.match(raw)
+        if not m:
+            raise ValueError(f"could not parse git URL: {url!r}")
+        scheme = "scp"
+        host = m.group(1)
+        path = "/" + m.group(2)
+
+    if not host or not _GIT_HOST_RE.match(host):
+        raise ValueError(f"invalid host in git URL {url!r}: {host!r}")
+
+    parts = [p for p in path.split("/") if p]
+    if len(parts) != 2:
+        raise ValueError(
+            f"git URL must be of the form host/owner/repo (got {len(parts)} "
+            f"path segments): {url!r}"
+        )
+
+    owner, repo = parts[0], parts[1]
+    if repo.endswith(".git"):
+        repo = repo[:-4]
+
+    for label, name in (("owner", owner), ("repo", repo)):
+        if not _GIT_NAME_RE.match(name) or set(name) <= {"."}:
+            raise ValueError(f"invalid {label} in git URL {url!r}: {name!r}")
+
+    return {"scheme": scheme, "host": host.lower(), "owner": owner, "repo": repo}
+
+
+def _enforce_clone_allowlists(parsed: dict[str, str], url: str) -> None:
+    """Apply GRAPHIFY_CLONE_ALLOWED_HOSTS / _OWNERS gates (combined with AND).
+
+    Each gate is independent: hosts allowlist is checked iff
+    ``GRAPHIFY_CLONE_ALLOWED_HOSTS`` is set; same for owners. Both compare
+    case-insensitively (DNS hostnames and platform usernames are
+    case-insensitive on every relevant forge).
+    """
+    raw_hosts = os.environ.get("GRAPHIFY_CLONE_ALLOWED_HOSTS")
+    if raw_hosts:
+        allowed = {h.strip().lower() for h in raw_hosts.split(",") if h.strip()}
+        if allowed and parsed["host"].lower() not in allowed:
+            raise ValueError(
+                f"clone host {parsed['host']!r} not in GRAPHIFY_CLONE_ALLOWED_HOSTS "
+                f"({sorted(allowed)}). url={url!r}"
+            )
+    raw_owners = os.environ.get("GRAPHIFY_CLONE_ALLOWED_OWNERS")
+    if raw_owners:
+        allowed = {o.strip().lower() for o in raw_owners.split(",") if o.strip()}
+        if allowed and parsed["owner"].lower() not in allowed:
+            raise ValueError(
+                f"clone owner {parsed['owner']!r} not in GRAPHIFY_CLONE_ALLOWED_OWNERS "
+                f"({sorted(allowed)}). url={url!r}"
+            )
+
+
 def _clone_repo(url: str, branch: str | None = None, out_dir: Path | None = None) -> Path:
-    """Clone a GitHub repo to a local cache dir and return the path.
+    """Clone a git repo to a local cache dir and return the path.
 
     Clones into ~/.graphify/repos/<owner>/<repo> by default so repeated
     runs on the same URL reuse the existing clone (git pull instead of clone).
     """
     import subprocess as _sp
-    import re as _re
 
-    # Normalise URL — strip trailing .git if present
-    url = url.rstrip("/")
-    if not url.endswith(".git"):
-        git_url = url + ".git"
-    else:
-        git_url = url
-        url = url[:-4]
-
-    # Extract owner/repo from URL
-    m = _re.search(r"github\.com[:/]([^/]+)/([^/]+?)(?:\.git)?$", url)
-    if not m:
-        print(f"error: not a recognised GitHub URL: {url}", file=sys.stderr)
+    try:
+        parsed = _parse_git_url(url)
+        _enforce_clone_allowlists(parsed, url)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         sys.exit(1)
-    owner, repo = m.group(1), m.group(2)
+
+    owner, repo = parsed["owner"], parsed["repo"]
+
+    # Build the clone target URL. For HTTPS/HTTP/SSH/git/SCP forms, append
+    # `.git` if missing — git accepts both, but the canonical form is the
+    # `.git` suffix and it makes the resulting `origin` URL stable.
+    canonical = url.strip().rstrip("/")
+    git_url = canonical if canonical.endswith(".git") else canonical + ".git"
 
     if out_dir:
         dest = out_dir
@@ -998,17 +1096,17 @@ def _clone_repo(url: str, branch: str | None = None, out_dir: Path | None = None
         print(f"Repo already cloned at {dest} — pulling latest...", flush=True)
         cmd = ["git", "-C", str(dest), "pull"]
         if branch:
-            cmd += ["origin", branch]
+            cmd += ["--", "origin", branch]
         result = _sp.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             print(f"warning: git pull failed:\n{result.stderr}", file=sys.stderr)
     else:
         dest.parent.mkdir(parents=True, exist_ok=True)
-        print(f"Cloning {url} → {dest} ...", flush=True)
+        print(f"Cloning {canonical} → {dest} ...", flush=True)
         cmd = ["git", "clone", "--depth", "1"]
         if branch:
             cmd += ["--branch", branch]
-        cmd += [git_url, str(dest)]
+        cmd += ["--", git_url, str(dest)]
         result = _sp.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             print(f"error: git clone failed:\n{result.stderr}", file=sys.stderr)

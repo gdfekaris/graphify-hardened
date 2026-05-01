@@ -42,6 +42,12 @@ The following keep/drop decisions were made during fork setup. Each dropped extr
 | `video` | `faster-whisper`, `yt-dlp` | **Drop** | See "Rationale for dropping `[video]`" below. |
 | `kimi` | `openai` (Moonshot client) | **Drop** | Routes extraction through a different upstream LLM provider than the user's primary coding assistant. The user prefers to keep extraction on a single provider for a smaller trust surface. |
 
+### Phase 1 — Dependency hardening
+
+- **Lockfile committed (Task 1.3 / 1.4).** A `uv.lock` covering all required and kept-extra dependencies is now committed at the repo root. Removed from `.gitignore`. Generated with `uv 0.11.8` against Python 3.11; resolved 105 packages.
+
+  **Scope of protection:** graphify is published as a library, so the lockfile primarily protects this fork's *own* development and CI builds, not downstream consumers who `pip install graphifyy` (those resolve transitive dependencies against the version ranges declared in `pyproject.toml`). For a private hardened fork that is not yet published, this is the relevant scope. The lockfile also gives `pip-audit` and `osv-scanner` (Task 1.6, 1.7) a fully-pinned input to scan against.
+
 #### Rationale for dropping `[video]`
 
 The `[video]` extra turns graphify from "parses local code and docs" into "downloads arbitrary media from arbitrary URLs and feeds it to two complex C/Python parsers." That is a categorical jump in attack surface that is not justified by the user's intended use, which does not include video/audio ingestion. Specifically:

@@ -1,0 +1,6 @@
+Warning: plugin transitivedependency/pomxml can be risky when run on untrusted artifacts. Please ensure you trust the source code and artifacts before proceeding.
+Starting filesystem walk for root: /
+Scanned /home/geo/Desktop/graphify-hardened/uv.lock file and found 105 packages
+End status: 0 dirs visited, 1 inodes visited, 1 Extract calls, 15.109795ms elapsed, 15.10983ms wall time
+
+No issues found

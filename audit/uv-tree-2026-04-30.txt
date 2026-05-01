@@ -1,0 +1,166 @@
+Using CPython 3.11.15
+Resolved 105 packages in 0.67ms
+graphifyy v0.5.7
+├── networkx v3.6.1
+├── tree-sitter v0.25.2
+├── tree-sitter-c v0.24.2
+├── tree-sitter-c-sharp v0.23.5
+├── tree-sitter-cpp v0.23.4
+├── tree-sitter-elixir v0.3.5
+├── tree-sitter-go v0.25.0
+├── tree-sitter-java v0.23.5
+├── tree-sitter-javascript v0.25.0
+├── tree-sitter-julia v0.23.1
+├── tree-sitter-kotlin v1.1.0
+├── tree-sitter-lua v0.5.0
+├── tree-sitter-objc v3.0.2
+├── tree-sitter-php v0.24.1
+├── tree-sitter-powershell v0.26.3
+├── tree-sitter-python v0.25.0
+├── tree-sitter-ruby v0.23.1
+├── tree-sitter-rust v0.24.2
+├── tree-sitter-scala v0.26.0
+├── tree-sitter-swift v0.0.1
+├── tree-sitter-typescript v0.23.2
+├── tree-sitter-verilog v1.0.3
+├── tree-sitter-zig v1.1.2
+├── graspologic v3.4.4 (extra: all)
+│   ├── anytree v2.13.0
+│   ├── beartype v0.18.5
+│   ├── future v1.0.0
+│   ├── gensim v4.4.0
+│   │   ├── numpy v1.26.4
+│   │   ├── scipy v1.17.1
+│   │   │   └── numpy v1.26.4
+│   │   └── smart-open v7.6.0
+│   │       └── wrapt v2.1.2
+│   ├── graspologic-native v1.2.5
+│   ├── hyppo v0.5.2
+│   │   ├── autograd v1.8.0
+│   │   │   └── numpy v1.26.4
+│   │   ├── future v1.0.0
+│   │   ├── numba v0.65.1
+│   │   │   ├── llvmlite v0.47.0
+│   │   │   └── numpy v1.26.4
+│   │   ├── numpy v1.26.4
+│   │   ├── pandas v3.0.2
+│   │   │   ├── numpy v1.26.4
+│   │   │   └── python-dateutil v2.9.0.post0
+│   │   │       └── six v1.17.0
+│   │   ├── patsy v1.0.2
+│   │   │   └── numpy v1.26.4
+│   │   ├── scikit-learn v1.8.0
+│   │   │   ├── joblib v1.5.3
+│   │   │   ├── numpy v1.26.4
+│   │   │   ├── scipy v1.17.1 (*)
+│   │   │   └── threadpoolctl v3.6.0
+│   │   ├── scipy v1.17.1 (*)
+│   │   └── statsmodels v0.14.6
+│   │       ├── numpy v1.26.4
+│   │       ├── packaging v26.2
+│   │       ├── pandas v3.0.2 (*)
+│   │       ├── patsy v1.0.2 (*)
+│   │       └── scipy v1.17.1 (*)
+│   ├── joblib v1.5.3
+│   ├── matplotlib v3.10.9
+│   │   ├── contourpy v1.3.3
+│   │   │   └── numpy v1.26.4
+│   │   ├── cycler v0.12.1
+│   │   ├── fonttools v4.62.1
+│   │   ├── kiwisolver v1.5.0
+│   │   ├── numpy v1.26.4
+│   │   ├── packaging v26.2
+│   │   ├── pillow v12.2.0
+│   │   ├── pyparsing v3.3.2
+│   │   └── python-dateutil v2.9.0.post0 (*)
+│   ├── networkx v3.6.1
+│   ├── numpy v1.26.4
+│   ├── pot v0.9.6.post1
+│   │   ├── numpy v1.26.4
+│   │   └── scipy v1.17.1 (*)
+│   ├── scikit-learn v1.8.0 (*)
+│   ├── scipy v1.17.1 (*)
+│   ├── seaborn v0.13.2
+│   │   ├── matplotlib v3.10.9 (*)
+│   │   ├── numpy v1.26.4
+│   │   └── pandas v3.0.2 (*)
+│   ├── statsmodels v0.14.6 (*)
+│   ├── typing-extensions v4.15.0
+│   └── umap-learn v0.5.12
+│       ├── numba v0.65.1 (*)
+│       ├── numpy v1.26.4
+│       ├── pynndescent v0.6.0
+│       │   ├── joblib v1.5.3
+│       │   ├── llvmlite v0.47.0
+│       │   ├── numba v0.65.1 (*)
+│       │   ├── scikit-learn v1.8.0 (*)
+│       │   └── scipy v1.17.1 (*)
+│       ├── scikit-learn v1.8.0 (*)
+│       ├── scipy v1.17.1 (*)
+│       └── tqdm v4.67.3
+├── html2text v2025.4.15 (extra: all)
+├── matplotlib v3.10.9 (extra: all) (*)
+├── mcp v1.27.0 (extra: all)
+│   ├── anyio v4.13.0
+│   │   ├── idna v3.13
+│   │   └── typing-extensions v4.15.0
+│   ├── httpx v0.28.1
+│   │   ├── anyio v4.13.0 (*)
+│   │   ├── certifi v2026.4.22
+│   │   ├── httpcore v1.0.9
+│   │   │   ├── certifi v2026.4.22
+│   │   │   └── h11 v0.16.0
+│   │   └── idna v3.13
+│   ├── httpx-sse v0.4.3
+│   ├── jsonschema v4.26.0
+│   │   ├── attrs v26.1.0
+│   │   ├── jsonschema-specifications v2025.9.1
+│   │   │   └── referencing v0.37.0
+│   │   │       ├── attrs v26.1.0
+│   │   │       ├── rpds-py v0.30.0
+│   │   │       └── typing-extensions v4.15.0
+│   │   ├── referencing v0.37.0 (*)
+│   │   └── rpds-py v0.30.0
+│   ├── pydantic v2.13.3
+│   │   ├── annotated-types v0.7.0
+│   │   ├── pydantic-core v2.46.3
+│   │   │   └── typing-extensions v4.15.0
+│   │   ├── typing-extensions v4.15.0
+│   │   └── typing-inspection v0.4.2
+│   │       └── typing-extensions v4.15.0
+│   ├── pydantic-settings v2.14.0
+│   │   ├── pydantic v2.13.3 (*)
+│   │   ├── python-dotenv v1.2.2
+│   │   └── typing-inspection v0.4.2 (*)
+│   ├── pyjwt[crypto] v2.12.1
+│   │   └── cryptography v47.0.0 (extra: crypto)
+│   │       └── cffi v2.0.0
+│   │           └── pycparser v3.0
+│   ├── python-multipart v0.0.27
+│   ├── sse-starlette v3.4.1
+│   │   ├── anyio v4.13.0 (*)
+│   │   └── starlette v1.0.0
+│   │       ├── anyio v4.13.0 (*)
+│   │       └── typing-extensions v4.15.0
+│   ├── starlette v1.0.0 (*)
+│   ├── typing-extensions v4.15.0
+│   ├── typing-inspection v0.4.2 (*)
+│   └── uvicorn v0.46.0
+│       ├── click v8.3.3
+│       └── h11 v0.16.0
+├── openpyxl v3.1.5 (extra: all)
+│   └── et-xmlfile v2.0.0
+├── pypdf v6.10.2 (extra: all)
+├── python-docx v1.2.0 (extra: all)
+│   ├── lxml v6.1.0
+│   └── typing-extensions v4.15.0
+├── watchdog v6.0.0 (extra: all)
+├── graspologic v3.4.4 (extra: leiden) (*)
+├── mcp v1.27.0 (extra: mcp) (*)
+├── openpyxl v3.1.5 (extra: office) (*)
+├── python-docx v1.2.0 (extra: office) (*)
+├── html2text v2025.4.15 (extra: pdf)
+├── pypdf v6.10.2 (extra: pdf)
+├── matplotlib v3.10.9 (extra: svg) (*)
+└── watchdog v6.0.0 (extra: watch)
+(*) Package tree already displayed

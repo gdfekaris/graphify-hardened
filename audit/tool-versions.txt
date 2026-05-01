@@ -1,0 +1,35 @@
+Tool versions used to produce the 2026-04-30 audit reports.
+
+uv
+  version: 0.11.8
+  binary:  installed via pip3 (system PATH)
+  source:  https://github.com/astral-sh/uv
+
+pip-audit
+  version: 2.10.0
+  binary:  fetched on-demand via `uv tool run pip-audit` (uv-managed cache)
+  source:  https://github.com/pypa/pip-audit
+  vulnerability database: PyPI's advisory DB
+
+osv-scanner
+  version: 2.3.5  (osv-scalibr 0.4.5)
+  commit:  30bcc134e23fbc35731021ee43ec433c483715d7
+  built:   2026-03-24T05:36:59Z
+  binary:  ~/.local/bin/osv-scanner
+  sha256:  bb30c580afe5e757d3e959f4afd08a4795ea505ef84c46962b9a738aa573b41b
+  source:  https://github.com/google/osv-scanner/releases/download/v2.3.5/osv-scanner_linux_amd64
+  vulnerability database: OSV.dev (aggregates GHSA, PyPA, RustSec, etc.)
+
+Trust-scope note for osv-scanner install:
+  The SHA256 above was verified against osv-scanner_SHA256SUMS published in the
+  same v2.3.5 GitHub release. This protects against bit-rot and CDN tampering
+  but not against compromise of the GitHub release itself. Stronger
+  verification would use `cosign verify-blob` against the sigstore signature
+  osv-scanner publishes. For a private hardened fork run locally this level
+  is accepted; revisit if/when this fork goes public.
+
+Reproducibility:
+  uv export --format requirements-txt --no-emit-project --all-extras 2>/dev/null > /tmp/requirements.txt
+  uv tree --no-dev > audit/uv-tree-<date>.txt
+  uv tool run pip-audit -r /tmp/requirements.txt > audit/pip-audit-<date>.txt 2>&1
+  osv-scanner --lockfile uv.lock > audit/osv-scanner-<date>.txt 2>&1

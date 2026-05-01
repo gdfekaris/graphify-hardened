@@ -327,6 +327,20 @@ graphify watch ./src                         # auto-rebuild on code changes
 graphify check-update ./src                  # check if semantic re-extraction is pending (cron-safe)
 graphify update ./src                        # re-extract code files, no LLM needed
 graphify cluster-only ./my-project           # rerun clustering on existing graph.json
+
+# untrusted-corpus mode — first-pass exploration of a freshly cloned repo
+# Skips every LLM call. Code goes through the AST extractor as usual; docs,
+# papers, and images become metadata-only nodes (path + size + sha256 + type)
+# with no content read. The resulting graph is structurally smaller but
+# carries zero LLM-generated text from the corpus, so a hostile README or
+# paper cannot inject instructions into your assistant. Re-run without
+# the flag once you have read the contents and trust the corpus.
+graphify update ./untrusted-clone --untrusted-corpus
+graphify watch  ./untrusted-clone --untrusted-corpus
+
+# `graphify add <url>` refuses to extend a graph that was built in
+# --untrusted-corpus mode unless --force is given.
+graphify add https://example.com/x --force
 ```
 
 Works with any mix of file types:

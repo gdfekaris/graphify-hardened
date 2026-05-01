@@ -345,7 +345,14 @@ def attach_hyperedges(G: nx.Graph, hyperedges: list) -> None:
     G.graph["hyperedges"] = existing
 
 
-def to_json(G: nx.Graph, communities: dict[int, list[str]], output_path: str, *, force: bool = False) -> bool:
+def to_json(
+    G: nx.Graph,
+    communities: dict[int, list[str]],
+    output_path: str,
+    *,
+    force: bool = False,
+    mode: str | None = None,
+) -> bool:
     # Safety check: refuse to silently shrink an existing graph (#479)
     existing_path = Path(output_path)
     if not force and existing_path.exists():
@@ -379,6 +386,14 @@ def to_json(G: nx.Graph, communities: dict[int, list[str]], output_path: str, *,
             conf = link.get("confidence", "EXTRACTED")
             link["confidence_score"] = _CONFIDENCE_SCORE_DEFAULTS.get(conf, 1.0)
     data["hyperedges"] = getattr(G, "graph", {}).get("hyperedges", [])
+    # Persist the build mode (e.g. "untrusted-corpus") under the graph
+    # attributes dict so MCP and exports can see it after a reload.
+    if mode is not None:
+        graph_attrs = data.get("graph")
+        if not isinstance(graph_attrs, dict):
+            graph_attrs = {}
+        graph_attrs["mode"] = mode
+        data["graph"] = graph_attrs
     with open(output_path, "w", encoding="utf-8") as f:  # nosec
         json.dump(data, f, indent=2)
     return True

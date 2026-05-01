@@ -1384,13 +1384,15 @@ def main() -> None:
 
     elif cmd == "add":
         if len(sys.argv) < 3:
-            print("Usage: graphify add <url> [--author Name] [--contributor Name] [--dir ./raw]", file=sys.stderr)
+            print("Usage: graphify add <url> [--author Name] [--contributor Name] [--dir ./raw] [--force]", file=sys.stderr)
             sys.exit(1)
         from graphify.ingest import ingest as _ingest
+        from graphify.untrusted import is_untrusted_corpus_graph
         url = sys.argv[2]
         author: str | None = None
         contributor: str | None = None
         target_dir = Path("raw")
+        force = False
         args = sys.argv[3:]
         i = 0
         while i < len(args):
@@ -1400,8 +1402,31 @@ def main() -> None:
                 contributor = args[i + 1]; i += 2
             elif args[i] == "--dir" and i + 1 < len(args):
                 target_dir = Path(args[i + 1]); i += 2
+            elif args[i] == "--force":
+                force = True; i += 1
             else:
                 i += 1
+
+        # Phase 3 Task 3.6: refuse to extend an untrusted-corpus graph with
+        # newly fetched URLs unless the user opts in with --force. Adding
+        # an attacker-served URL into a graph the user has flagged as
+        # untrusted is exactly the workflow this mode is meant to gate.
+        graph_path = Path("graphify-out/graph.json")
+        if graph_path.exists() and not force:
+            try:
+                graph_data = json.loads(graph_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                graph_data = {}
+            if is_untrusted_corpus_graph(graph_data):
+                print(
+                    "error: graphify-out/graph.json was built in --untrusted-corpus mode. "
+                    "Adding new URLs would mix untrusted material into a graph you flagged "
+                    "as untrusted. Re-run without --untrusted-corpus once you trust the "
+                    "corpus, or pass --force to override.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+
         try:
             saved = _ingest(url, target_dir, author=author, contributor=contributor)
             print(f"Saved to {saved}")
@@ -1411,13 +1436,16 @@ def main() -> None:
             sys.exit(1)
 
     elif cmd == "watch":
-        watch_path = Path(sys.argv[2]) if len(sys.argv) > 2 else Path(".")
+        args = sys.argv[2:]
+        untrusted = "--untrusted-corpus" in args
+        positional = [a for a in args if not a.startswith("--")]
+        watch_path = Path(positional[0]) if positional else Path(".")
         if not watch_path.exists():
             print(f"error: path not found: {watch_path}", file=sys.stderr)
             sys.exit(1)
         from graphify.watch import watch as _watch
         try:
-            _watch(watch_path)
+            _watch(watch_path, untrusted=untrusted)
         except ImportError as exc:
             print(f"error: {exc}", file=sys.stderr)
             sys.exit(1)
@@ -1456,8 +1484,11 @@ def main() -> None:
         print(f"Done — {len(communities)} communities. GRAPH_REPORT.md, graph.json and graph.html updated.")
 
     elif cmd == "update":
-        if len(sys.argv) > 2:
-            watch_path = Path(sys.argv[2])
+        args = sys.argv[2:]
+        untrusted = "--untrusted-corpus" in args
+        positional = [a for a in args if not a.startswith("--")]
+        if positional:
+            watch_path = Path(positional[0])
         else:
             # Try to recover the scan root saved by the last full build
             saved = Path("graphify-out/.graphify_root")
@@ -1468,16 +1499,26 @@ def main() -> None:
         if not watch_path.exists():
             print(f"error: path not found: {watch_path}", file=sys.stderr)
             sys.exit(1)
-        from graphify.watch import _rebuild_code
-        print(f"Re-extracting code files in {watch_path} (no LLM needed)...")
-        ok = _rebuild_code(watch_path)
-        if ok:
-            print("Code graph updated. For doc/paper/image changes run /graphify --update in your AI assistant.")
-            if not os.environ.get("MOONSHOT_API_KEY") and not os.environ.get("GRAPHIFY_NO_TIPS"):
-                print("Tip: set MOONSHOT_API_KEY to use Kimi K2.6 for semantic extraction — 3x cheaper, richer graphs. pip install 'graphifyy[kimi]'")
+        if untrusted:
+            from graphify.watch import _rebuild_untrusted
+            print(f"Building untrusted-corpus graph in {watch_path} (no LLM, metadata-only for non-code files)...")
+            ok = _rebuild_untrusted(watch_path)
+            if ok:
+                print("Untrusted-corpus graph built. Re-run without --untrusted-corpus once you trust the corpus.")
+            else:
+                print("Build failed — check output above.", file=sys.stderr)
+                sys.exit(1)
         else:
-            print("Nothing to update or rebuild failed — check output above.", file=sys.stderr)
-            sys.exit(1)
+            from graphify.watch import _rebuild_code
+            print(f"Re-extracting code files in {watch_path} (no LLM needed)...")
+            ok = _rebuild_code(watch_path)
+            if ok:
+                print("Code graph updated. For doc/paper/image changes run /graphify --update in your AI assistant.")
+                if not os.environ.get("MOONSHOT_API_KEY") and not os.environ.get("GRAPHIFY_NO_TIPS"):
+                    print("Tip: set MOONSHOT_API_KEY to use Kimi K2.6 for semantic extraction — 3x cheaper, richer graphs. pip install 'graphifyy[kimi]'")
+            else:
+                print("Nothing to update or rebuild failed — check output above.", file=sys.stderr)
+                sys.exit(1)
 
     elif cmd == "check-update":
         if len(sys.argv) < 3:

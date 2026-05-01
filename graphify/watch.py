@@ -136,6 +136,129 @@ def _rebuild_code(watch_path: Path, *, follow_symlinks: bool = False) -> bool:
         return False
 
 
+def _rebuild_untrusted(watch_path: Path, *, follow_symlinks: bool = False) -> bool:
+    """Build a graph in --untrusted-corpus mode (Phase 3 Task 3.6).
+
+    Code files go through the AST extractor as usual. Every other
+    recognised file type (document, paper, image) becomes a metadata-only
+    node — path + size + SHA256 + file_type — with no content read.
+    No LLM call is made anywhere in this path. The graph is tagged
+    ``mode: untrusted-corpus`` in graph.json so downstream consumers
+    (MCP, exports, ``graphify add``) can surface or gate on the mode.
+
+    Returns True on success, False on error.
+    """
+    watch_root = watch_path.resolve()
+    project_root = Path.cwd().resolve() if not watch_path.is_absolute() else watch_root
+    report_root = _report_root_label(watch_path)
+    try:
+        from graphify.extract import extract
+        from graphify.detect import detect
+        from graphify.build import build_from_json
+        from graphify.cluster import cluster, score_all
+        from graphify.analyze import god_nodes, surprising_connections, suggest_questions
+        from graphify.report import generate
+        from graphify.export import to_json, to_html
+        from graphify.untrusted import MODE_UNTRUSTED, metadata_node_for_file
+
+        detected = detect(watch_path, follow_symlinks=follow_symlinks)
+        code_files = [Path(f) for f in detected["files"]["code"]]
+        non_code: list[Path] = []
+        for bucket in ("document", "paper", "image"):
+            non_code.extend(Path(f) for f in detected["files"].get(bucket, []))
+
+        if not code_files and not non_code:
+            print("[graphify untrusted] No recognised files found - nothing to build.")
+            return False
+
+        result: dict = (
+            extract(code_files, cache_root=watch_root)
+            if code_files
+            else {"nodes": [], "edges": [], "hyperedges": [],
+                  "input_tokens": 0, "output_tokens": 0}
+        )
+
+        existing_ids = {n["id"] for n in result["nodes"]}
+        for path in non_code:
+            node = metadata_node_for_file(path, watch_root)
+            if node is None or node["id"] in existing_ids:
+                continue
+            result["nodes"].append(node)
+            existing_ids.add(node["id"])
+
+        _relativize_source_files(result, project_root)
+
+        detection = {
+            "files": {
+                "code": [str(f) for f in code_files],
+                "document": [str(f) for f in non_code if f.suffix.lower() in DOC_EXTENSIONS],
+                "paper":    [str(f) for f in non_code if f.suffix.lower() in PAPER_EXTENSIONS],
+                "image":    [str(f) for f in non_code if f.suffix.lower() in IMAGE_EXTENSIONS],
+            },
+            "total_files": len(code_files) + len(non_code),
+            "total_words": detected.get("total_words", 0),
+        }
+
+        G = build_from_json(result)
+        G.graph["mode"] = MODE_UNTRUSTED
+        communities = cluster(G)
+        cohesion = score_all(G, communities)
+        gods = god_nodes(G)
+        surprises = surprising_connections(G, communities)
+        labels = {cid: "Community " + str(cid) for cid in communities}
+        questions = suggest_questions(G, communities, labels)
+
+        out = watch_path / "graphify-out"
+        out.mkdir(exist_ok=True)
+        (out / ".graphify_root").write_text(str(watch_root), encoding="utf-8")
+
+        json_written = to_json(
+            G, communities, str(out / "graph.json"),
+            mode=MODE_UNTRUSTED, force=True,
+        )
+        if not json_written:
+            return False
+
+        report = generate(
+            G, communities, cohesion, labels, gods, surprises, detection,
+            {"input": 0, "output": 0}, report_root, suggested_questions=questions,
+        )
+        report = (
+            "> **untrusted-corpus mode** — this graph was built without invoking an "
+            "LLM. Non-code files appear as metadata-only nodes (path + size + sha256). "
+            "Re-run without --untrusted-corpus once you trust the corpus.\n\n"
+            + report
+        )
+        (out / "GRAPH_REPORT.md").write_text(report, encoding="utf-8")
+
+        html_written = False
+        try:
+            to_html(G, communities, str(out / "graph.html"), community_labels=labels or None)
+            html_written = True
+        except ValueError as viz_err:
+            print(f"[graphify untrusted] Skipped graph.html: {viz_err}")
+            stale = out / "graph.html"
+            if stale.exists():
+                stale.unlink()
+
+        flag = out / "needs_update"
+        if flag.exists():
+            flag.unlink()
+
+        print(
+            f"[graphify untrusted] Built: {G.number_of_nodes()} nodes, "
+            f"{G.number_of_edges()} edges, {len(communities)} communities "
+            f"({len(non_code)} metadata-only)"
+        )
+        products = "graph.json" + (", graph.html" if html_written else "") + " and GRAPH_REPORT.md"
+        print(f"[graphify untrusted] {products} updated in {out}")
+        return True
+
+    except Exception as exc:
+        print(f"[graphify untrusted] Build failed: {exc}")
+        return False
+
+
 def check_update(watch_path: Path) -> bool:
     """Check for pending semantic update flag and notify the user if set.
 
@@ -166,13 +289,18 @@ def _has_non_code(changed_paths: list[Path]) -> bool:
     return any(p.suffix.lower() not in _CODE_EXTENSIONS for p in changed_paths)
 
 
-def watch(watch_path: Path, debounce: float = 3.0) -> None:
+def watch(watch_path: Path, debounce: float = 3.0, *, untrusted: bool = False) -> None:
     """
     Watch watch_path for new or modified files and auto-update the graph.
 
     For code-only changes: re-runs AST extraction + rebuild immediately (no LLM).
     For doc/paper/image changes: writes a needs_update flag and notifies the user
     to run /graphify --update (LLM extraction required).
+
+    When ``untrusted`` is True (Phase 3 Task 3.6), every rebuild — including
+    those triggered by doc/paper/image changes — uses the metadata-only
+    untrusted-corpus path. No LLM is ever invoked, no needs_update flag
+    is written.
 
     debounce: seconds to wait after the last change before triggering (avoids
     running on every keystroke when many files are saved at once).
@@ -211,8 +339,12 @@ def watch(watch_path: Path, debounce: float = 3.0) -> None:
     observer.start()
 
     print(f"[graphify watch] Watching {watch_path.resolve()} - press Ctrl+C to stop")
-    print(f"[graphify watch] Code changes rebuild graph automatically. "
-          f"Doc/image changes require /graphify --update.")
+    if untrusted:
+        print("[graphify watch] untrusted-corpus mode: rebuilds skip LLM extraction "
+              "and treat doc/paper/image files as metadata-only.")
+    else:
+        print(f"[graphify watch] Code changes rebuild graph automatically. "
+              f"Doc/image changes require /graphify --update.")
     print(f"[graphify watch] Debounce: {debounce}s")
 
     try:
@@ -223,7 +355,9 @@ def watch(watch_path: Path, debounce: float = 3.0) -> None:
                 batch = list(changed)
                 changed.clear()
                 print(f"\n[graphify watch] {len(batch)} file(s) changed")
-                if _has_non_code(batch):
+                if untrusted:
+                    _rebuild_untrusted(watch_path)
+                elif _has_non_code(batch):
                     _notify_only(watch_path)
                 else:
                     _rebuild_code(watch_path)

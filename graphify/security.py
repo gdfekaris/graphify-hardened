@@ -208,6 +208,58 @@ def safe_fetch(url: str, max_bytes: int = _MAX_FETCH_BYTES, timeout: int = 30) -
     return b"".join(chunks)
 
 
+def safe_fetch_with_headers(
+    url: str, max_bytes: int = _MAX_FETCH_BYTES, timeout: int = 30
+) -> tuple[bytes, dict[str, str]]:
+    """Like safe_fetch, but also returns response headers as a lowercased dict.
+
+    Additive variant intended for callers that need to inspect Content-Type
+    or similar metadata before consuming the body. Headers come back as a
+    plain dict (keys lowercased); attribute access on the underlying response
+    is wrapped so unit-test mocks without a real .headers attribute degrade
+    to an empty dict instead of raising.
+    """
+    validate_url(url)
+    opener = _build_opener()
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 graphify/1.0"})
+
+    with _ssrf_guarded_socket(), opener.open(req, timeout=timeout) as resp:
+        status = getattr(resp, "status", None) or getattr(resp, "code", None)
+        if status is not None and not (200 <= status < 300):
+            raise urllib.error.HTTPError(url, status, f"HTTP {status}", {}, None)
+
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = resp.read(65_536)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise OSError(
+                    f"Response from {url!r} exceeds size limit "
+                    f"({max_bytes // 1_048_576} MB). Aborting download."
+                )
+            chunks.append(chunk)
+
+        try:
+            headers = {str(k).lower(): str(v) for k, v in resp.headers.items()}
+        except (AttributeError, TypeError):
+            headers = {}
+
+    return b"".join(chunks), headers
+
+
+def safe_fetch_text_with_headers(
+    url: str, max_bytes: int | None = None, timeout: int = 15
+) -> tuple[str, dict[str, str]]:
+    """Text counterpart to safe_fetch_with_headers; honors GRAPHIFY_MAX_TEXT_BYTES."""
+    if max_bytes is None:
+        max_bytes = _resolved_text_max_bytes()
+    raw, headers = safe_fetch_with_headers(url, max_bytes=max_bytes, timeout=timeout)
+    return raw.decode("utf-8", errors="replace"), headers
+
+
 def safe_fetch_text(url: str, max_bytes: int | None = None, timeout: int = 15) -> str:
     """Fetch *url* and return decoded text (UTF-8, replacing bad bytes).
 

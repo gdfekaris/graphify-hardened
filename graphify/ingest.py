@@ -1,13 +1,51 @@
 # fetch URLs (tweet/arxiv/pdf/web) and save as annotated markdown
 from __future__ import annotations
 import json
+import os
 import re
 import urllib.error
 import urllib.parse
+import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 
-from graphify.security import safe_fetch, safe_fetch_text, validate_url
+from graphify.security import (
+    safe_fetch_with_headers,
+    safe_fetch_text_with_headers,
+    validate_url,
+)
+
+
+# Per-URL-type Content-Type prefix allowlist. Values are matched case-insensitively
+# after stripping parameters (e.g. "; charset=utf-8"). The "image" entry uses the
+# bare "image/" prefix so any image subtype is accepted.
+_ALLOWED_CONTENT_TYPES: dict[str, tuple[str, ...]] = {
+    "tweet":   ("text/html", "application/json"),
+    "arxiv":   ("text/html", "application/pdf"),
+    "webpage": ("text/html",),
+    "pdf":     ("application/pdf",),
+    "image":   ("image/",),
+}
+
+
+def _check_content_type(content_type: str, allowed_prefixes: tuple[str, ...], url: str) -> None:
+    """Raise if response content-type is outside the allowlist for this URL type.
+
+    Honors GRAPHIFY_CONTENT_TYPE_STRICT: default (unset / "1") raises ValueError;
+    "0" downgrades to a RuntimeWarning so an operator who knows a target server
+    mislabels its responses can opt in to ingesting anyway.
+    """
+    bare = (content_type or "").split(";", 1)[0].strip().lower()
+    if any(bare.startswith(p) for p in allowed_prefixes):
+        return
+    msg = (
+        f"ingest: content-type {content_type!r} from {url!r} did not match "
+        f"expected prefixes {list(allowed_prefixes)}"
+    )
+    if os.environ.get("GRAPHIFY_CONTENT_TYPE_STRICT", "1") == "0":
+        warnings.warn(msg, RuntimeWarning, stacklevel=2)
+        return
+    raise ValueError(msg)
 
 
 def _yaml_str(s: str) -> str:
@@ -44,8 +82,10 @@ def _detect_url_type(url: str) -> str:
     return "webpage"
 
 
-def _fetch_html(url: str) -> str:
-    return safe_fetch_text(url)
+def _fetch_html(url: str, allowed_prefixes: tuple[str, ...] = ("text/html",)) -> str:
+    text, headers = safe_fetch_text_with_headers(url)
+    _check_content_type(headers.get("content-type", ""), allowed_prefixes, url)
+    return text
 
 
 def _html_to_markdown(html: str, url: str) -> str:
@@ -72,7 +112,13 @@ def _fetch_tweet(url: str, author: str | None, contributor: str | None) -> tuple
     oembed_url = url.replace("x.com", "twitter.com")
     oembed_api = f"https://publish.twitter.com/oembed?url={urllib.parse.quote(oembed_url)}&omit_script=true"
     try:
-        data = json.loads(safe_fetch_text(oembed_api))
+        body, headers = safe_fetch_text_with_headers(oembed_api)
+        _check_content_type(
+            headers.get("content-type", ""),
+            _ALLOWED_CONTENT_TYPES["tweet"],
+            oembed_api,
+        )
+        data = json.loads(body)
         tweet_text = re.sub(r"<[^>]+>", "", data.get("html", "")).strip()
         tweet_author = data.get("author_name", "unknown")
     except Exception:
@@ -173,11 +219,15 @@ Source: {url}
     return content, filename
 
 
-def _download_binary(url: str, suffix: str, target_dir: Path) -> Path:
+def _download_binary(
+    url: str, suffix: str, target_dir: Path, allowed_prefixes: tuple[str, ...]
+) -> Path:
     """Download a binary file (PDF, image) directly."""
     filename = _safe_filename(url, suffix)
     out_path = target_dir / filename
-    out_path.write_bytes(safe_fetch(url))
+    body, headers = safe_fetch_with_headers(url)
+    _check_content_type(headers.get("content-type", ""), allowed_prefixes, url)
+    out_path.write_bytes(body)
     return out_path
 
 
@@ -197,13 +247,13 @@ def ingest(url: str, target_dir: Path, author: str | None = None, contributor: s
 
     try:
         if url_type == "pdf":
-            out = _download_binary(url, ".pdf", target_dir)
+            out = _download_binary(url, ".pdf", target_dir, _ALLOWED_CONTENT_TYPES["pdf"])
             print(f"Downloaded PDF: {out.name}")
             return out
 
         if url_type == "image":
             suffix = Path(urllib.parse.urlparse(url).path).suffix or ".jpg"
-            out = _download_binary(url, suffix, target_dir)
+            out = _download_binary(url, suffix, target_dir, _ALLOWED_CONTENT_TYPES["image"])
             print(f"Downloaded image: {out.name}")
             return out
 

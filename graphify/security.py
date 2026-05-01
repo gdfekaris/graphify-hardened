@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import contextlib
 import html
+import os
 import re
 import urllib.error
 import urllib.parse
@@ -18,6 +19,19 @@ _MAX_TEXT_BYTES  = 10_485_760   # 10 MB hard cap for HTML / text
 
 # AWS metadata, link-local, and common cloud metadata endpoints
 _BLOCKED_HOSTS = {"metadata.google.internal", "metadata.google.com"}
+
+
+def _fetch_allowlist() -> set[str] | None:
+    """Read GRAPHIFY_FETCH_ALLOWLIST and return a lowercased hostname set.
+
+    Returns None when the env var is unset or contains no non-empty entries,
+    so the allowlist gate in validate_url is a no-op in that case.
+    """
+    raw = os.environ.get("GRAPHIFY_FETCH_ALLOWLIST")
+    if raw is None:
+        return None
+    hosts = {h.strip().lower() for h in raw.split(",") if h.strip()}
+    return hosts or None
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +77,13 @@ def validate_url(url: str) -> str:
             raise ValueError(
                 f"DNS resolution failed for '{hostname}': {exc}. Got: {url!r}"
             ) from exc
+
+        allowlist = _fetch_allowlist()
+        if allowlist is not None and hostname.lower() not in allowlist:
+            raise ValueError(
+                f"Hostname '{hostname}' not in GRAPHIFY_FETCH_ALLOWLIST "
+                f"({sorted(allowlist)}). Got: {url!r}"
+            )
 
     return url
 

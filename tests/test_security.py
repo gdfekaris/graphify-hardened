@@ -47,6 +47,30 @@ def test_validate_url_rejects_empty_scheme():
 
 
 # ---------------------------------------------------------------------------
+# validate_url - GRAPHIFY_FETCH_ALLOWLIST gate
+# ---------------------------------------------------------------------------
+
+def test_validate_url_allowlist_permits_listed_host(monkeypatch):
+    monkeypatch.setenv("GRAPHIFY_FETCH_ALLOWLIST", "arxiv.org,example.com")
+    assert validate_url("https://arxiv.org/abs/1706.03762") == "https://arxiv.org/abs/1706.03762"
+
+def test_validate_url_allowlist_rejects_unlisted_host(monkeypatch):
+    monkeypatch.setenv("GRAPHIFY_FETCH_ALLOWLIST", "arxiv.org")
+    with pytest.raises(ValueError, match="GRAPHIFY_FETCH_ALLOWLIST"):
+        validate_url("https://example.com/foo")
+
+def test_validate_url_allowlist_does_not_bypass_ip_range_check(monkeypatch):
+    # Even with the IP literal in the allowlist, the private-IP check fires first.
+    monkeypatch.setenv("GRAPHIFY_FETCH_ALLOWLIST", "127.0.0.1")
+    with pytest.raises(ValueError, match="private/internal IP"):
+        validate_url("http://127.0.0.1/admin")
+
+def test_validate_url_allowlist_unset_preserves_existing_behavior(monkeypatch):
+    monkeypatch.delenv("GRAPHIFY_FETCH_ALLOWLIST", raising=False)
+    assert validate_url("https://example.com/foo") == "https://example.com/foo"
+
+
+# ---------------------------------------------------------------------------
 # safe_fetch - scheme and redirect guards (mocked network)
 # ---------------------------------------------------------------------------
 

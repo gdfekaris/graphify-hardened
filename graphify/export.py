@@ -22,6 +22,46 @@ def _load_vis_network_js() -> str:
         )
     return js
 
+
+_SAFE_HREF_SCHEME_RE = re.compile(r"^([a-zA-Z][a-zA-Z0-9+.\-]*):")
+
+
+def _safe_href(value: str | None, *, allow_file: bool = True) -> str:
+    """Return value if it is a safe href for inlining, else '#'.
+
+    Safe: empty input maps to '#'; relative references (no scheme) pass
+    through; URLs with scheme http/https (or file when allow_file=True)
+    pass through. Everything else — javascript:, data:, vbscript:,
+    unknown schemes — is rejected and replaced with '#'.
+
+    Control characters are stripped before scheme detection so a leading
+    \\x09javascript: cannot smuggle past the allowlist.
+    """
+    if value is None:
+        return "#"
+    s = "".join(c for c in str(value).strip() if ord(c) >= 0x20)
+    if not s:
+        return "#"
+    m = _SAFE_HREF_SCHEME_RE.match(s)
+    if not m:
+        return s
+    scheme = m.group(1).lower()
+    allowed = {"http", "https"}
+    if allow_file:
+        allowed.add("file")
+    return s if scheme in allowed else "#"
+
+
+_CSP_META = (
+    '<meta http-equiv="Content-Security-Policy" '
+    'content="default-src \'self\' \'unsafe-inline\'; '
+    "script-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data:; "
+    "connect-src 'none'; "
+    "object-src 'none'; "
+    "base-uri 'none'\">"
+)
+
 def _strip_diacritics(text: str) -> str:
     import unicodedata
     nfkd = unicodedata.normalize("NFKD", text)
@@ -445,8 +485,8 @@ def to_html(
     # Build edges list
     vis_edges = []
     for u, v, data in G.edges(data=True):
-        confidence = data.get("confidence", "EXTRACTED")
-        relation = data.get("relation", "")
+        confidence = sanitize_label(data.get("confidence", "EXTRACTED"))
+        relation = sanitize_label(data.get("relation", ""))
         vis_edges.append({
             "from": u,
             "to": v,
@@ -473,7 +513,12 @@ def to_html(
     nodes_json = _js_safe(vis_nodes)
     edges_json = _js_safe(vis_edges)
     legend_json = _js_safe(legend_data)
-    hyperedges_json = _js_safe(getattr(G, "graph", {}).get("hyperedges", []))
+    raw_hyperedges = getattr(G, "graph", {}).get("hyperedges", [])
+    safe_hyperedges = [
+        {**h, "label": sanitize_label(h.get("label", ""))}
+        for h in raw_hyperedges
+    ]
+    hyperedges_json = _js_safe(safe_hyperedges)
     title = _html.escape(sanitize_label(str(output_path)))
     stats = f"{G.number_of_nodes()} nodes &middot; {G.number_of_edges()} edges &middot; {len(communities)} communities"
 
@@ -481,6 +526,7 @@ def to_html(
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+{_CSP_META}
 <title>graphify - {title}</title>
 <script>{_load_vis_network_js()}</script>
 {_html_styles()}

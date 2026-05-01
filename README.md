@@ -1,6 +1,6 @@
 # graphify-hardened
 
-A security-hardened fork of [graphify](https://github.com/graphifyy/graphify) with pinned dependency versions, a committed `uv.lock`, automated CVE scanning in CI (`pip-audit` + `osv-scanner`), and a reduced surface area (optional extras with stale or unmaintained dependencies have been dropped). Everything below is from the upstream README.
+A security-hardened fork of [graphify](https://github.com/safishamsi/graphify) with pinned dependency versions, a committed `uv.lock`, automated CVE scanning in CI (`pip-audit` + `osv-scanner`), and a reduced surface area (optional extras with stale or unmaintained dependencies have been dropped). Everything below is from the upstream README.
 
 **An AI coding assistant skill.** Type `/graphify` in Claude Code, Codex, OpenCode, Cursor, Gemini CLI, GitHub Copilot CLI, VS Code Copilot Chat, Aider, OpenClaw, Factory Droid, Trae, Hermes, Kiro, or Google Antigravity - it reads your files, builds a knowledge graph, and gives you back structure you didn't know was there. Understand a codebase faster. Find the "why" behind architectural decisions.
 

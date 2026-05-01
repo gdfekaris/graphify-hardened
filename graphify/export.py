@@ -1048,6 +1048,11 @@ def to_graphml(
     node_community = _node_community_map(communities)
     for node_id in H.nodes():
         H.nodes[node_id]["community"] = node_community.get(node_id, -1)
+        # GraphML's writer rejects list values - serialise provenance as JSON
+        # so it round-trips losslessly into Gephi/yEd as a single string attr.
+        prov = H.nodes[node_id].get("provenance")
+        if isinstance(prov, list):
+            H.nodes[node_id]["provenance"] = json.dumps(prov)
     nx.write_graphml(H, output_path)
 
 

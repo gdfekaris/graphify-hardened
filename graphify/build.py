@@ -39,6 +39,46 @@ def _normalize_id(s: str) -> str:
     return cleaned.strip("_").lower()
 
 
+# Sentinel used when a node lacks both an explicit `provenance` and a
+# `source_file`. Keeps provenance non-empty (per Phase 3.2 acceptance) while
+# making the gap visible to downstream consumers — e.g. status reporting.
+_UNKNOWN_PROVENANCE = "<unknown>"
+
+
+def _derive_provenance(node: dict) -> list[str]:
+    """Return the provenance list for a node, defaulting to its source_file.
+
+    Provenance records the corpus file(s) a node's content was derived from.
+    For most nodes this is a single-element list `[source_file]`; nodes
+    merged across multiple files (build collisions, label dedup) carry the
+    union. Falls back to a sentinel when neither field is populated, so the
+    field is always non-empty.
+    """
+    prov = node.get("provenance")
+    if isinstance(prov, list):
+        cleaned = [p for p in prov if isinstance(p, str) and p]
+        if cleaned:
+            return cleaned
+    elif isinstance(prov, str) and prov:
+        return [prov]
+    src = node.get("source_file")
+    if isinstance(src, str) and src:
+        return [src]
+    return [_UNKNOWN_PROVENANCE]
+
+
+def _merge_provenance(*lists: list[str]) -> list[str]:
+    """Union provenance lists, preserving order of first appearance."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for lst in lists:
+        for p in lst:
+            if p and p not in seen:
+                seen.add(p)
+                result.append(p)
+    return result
+
+
 def build_from_json(extraction: dict, *, directed: bool = False) -> nx.Graph:
     """Build a NetworkX graph from an extraction dict.
 
@@ -73,7 +113,15 @@ def build_from_json(extraction: dict, *, directed: bool = False) -> nx.Graph:
         print(f"[graphify] Extraction warning ({len(real_errors)} issues): {real_errors[0]}", file=sys.stderr)
     G: nx.Graph = nx.DiGraph() if directed else nx.Graph()
     for node in extraction.get("nodes", []):
-        G.add_node(node["id"], **{k: v for k, v in node.items() if k != "id"})
+        nid = node["id"]
+        attrs = {k: v for k, v in node.items() if k != "id"}
+        new_prov = _derive_provenance(node)
+        if nid in G:
+            existing_prov = G.nodes[nid].get("provenance", [])
+            attrs["provenance"] = _merge_provenance(existing_prov, new_prov)
+        else:
+            attrs["provenance"] = new_prov
+        G.add_node(nid, **attrs)
     node_set = set(G.nodes())
     # Normalized ID map: lets edges survive when the LLM generates IDs with
     # slightly different casing or punctuation than the AST extractor.
@@ -152,16 +200,23 @@ def deduplicate_by_label(nodes: list[dict], edges: list[dict]) -> tuple[list[dic
         else:
             has_suffix = bool(_CHUNK_SUFFIX.search(node["id"]))
             existing_has_suffix = bool(_CHUNK_SUFFIX.search(existing["id"]))
+            merged_prov = _merge_provenance(
+                _derive_provenance(existing), _derive_provenance(node)
+            )
             if has_suffix and not existing_has_suffix:
                 remap[node["id"]] = existing["id"]
+                existing["provenance"] = merged_prov
             elif existing_has_suffix and not has_suffix:
                 remap[existing["id"]] = node["id"]
+                node["provenance"] = merged_prov
                 canonical[key] = node
             elif len(node["id"]) < len(existing["id"]):
                 remap[existing["id"]] = node["id"]
+                node["provenance"] = merged_prov
                 canonical[key] = node
             else:
                 remap[node["id"]] = existing["id"]
+                existing["provenance"] = merged_prov
 
     if not remap:
         return nodes, edges

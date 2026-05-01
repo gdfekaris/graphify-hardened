@@ -35,6 +35,14 @@ def validate_extraction(data: dict) -> list[str]:
                     f"Node {i} (id={node.get('id', '?')!r}) has invalid file_type "
                     f"'{node['file_type']}' - must be one of {sorted(VALID_FILE_TYPES)}"
                 )
+            if "provenance" in node:
+                prov = node["provenance"]
+                if not (isinstance(prov, list) and prov
+                        and all(isinstance(p, str) and p for p in prov)):
+                    errors.append(
+                        f"Node {i} (id={node.get('id', '?')!r}) has invalid 'provenance' "
+                        f"- must be a non-empty list of non-empty strings"
+                    )
 
     # Edges - accept "links" (NetworkX <= 3.1) as fallback for "edges"
     edge_list = data.get("edges") if "edges" in data else data.get("links")

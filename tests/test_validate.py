@@ -85,3 +85,47 @@ def test_assert_valid_raises_on_errors():
 
 def test_assert_valid_passes_silently():
     assert_valid(VALID)  # should not raise
+
+
+def test_provenance_optional_when_absent():
+    """provenance is derived in build, not required on extraction input."""
+    assert validate_extraction(VALID) == []
+
+
+def test_provenance_must_be_list_when_present():
+    data = {
+        "nodes": [{"id": "n1", "label": "A", "file_type": "code",
+                   "source_file": "a.py", "provenance": "a.py"}],
+        "edges": [],
+    }
+    errors = validate_extraction(data)
+    assert any("provenance" in e for e in errors)
+
+
+def test_provenance_must_be_non_empty():
+    data = {
+        "nodes": [{"id": "n1", "label": "A", "file_type": "code",
+                   "source_file": "a.py", "provenance": []}],
+        "edges": [],
+    }
+    errors = validate_extraction(data)
+    assert any("provenance" in e for e in errors)
+
+
+def test_provenance_must_be_strings():
+    data = {
+        "nodes": [{"id": "n1", "label": "A", "file_type": "code",
+                   "source_file": "a.py", "provenance": ["a.py", 42]}],
+        "edges": [],
+    }
+    errors = validate_extraction(data)
+    assert any("provenance" in e for e in errors)
+
+
+def test_provenance_valid_list_passes():
+    data = {
+        "nodes": [{"id": "n1", "label": "A", "file_type": "code",
+                   "source_file": "a.py", "provenance": ["a.py", "b.py"]}],
+        "edges": [],
+    }
+    assert validate_extraction(data) == []

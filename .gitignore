@@ -30,3 +30,5 @@ CLAUDE.md
 IMPLEMENTATION_PLAN.md
 BRANCHING_CLEANUP_PLAN.md
 BRANCHING_STRATEGY_GUIDE.md
+# Release artifacts — uploaded to GitHub Releases, never committed
+*.tar.gz

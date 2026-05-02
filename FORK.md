@@ -103,16 +103,16 @@ If anything in the checklist fails, do not cherry-pick that commit. Either skip 
 
 ### 4. Cherry-pick onto a working branch
 
-Add a temporary remote, fetch the relevant tag, and cherry-pick onto a fresh branch off `development`. The remote is intentionally ephemeral — the threat-model claim "no live upstream remote" only stays true if it is removed at the end of every batch.
+Add a temporary remote, fetch the relevant tag, and cherry-pick onto a fresh branch off `main`. The remote is intentionally ephemeral — the threat-model claim "no live upstream remote" only stays true if it is removed at the end of every batch.
 
 ```bash
 git remote add upstream-temp https://github.com/safishamsi/graphify.git
 git fetch upstream-temp "${NEW}"
-git checkout -b "upstream-${NEW}" development
+git checkout -b "upstream-${NEW}" main
 
 # For each upstream commit deemed safe and desirable in step 3:
 git cherry-pick <commit-sha>
-# Resolve conflicts. Each fork-local commit on `development` must still apply,
+# Resolve conflicts. Each fork-local commit on `main` must still apply,
 # or the cherry-pick must be explicitly deferred with a rationale captured
 # below in "Changes from upstream".
 
@@ -142,7 +142,7 @@ All tests must pass. The Phase 7 hardening regression suite (SSRF redirect chain
 
 ### 7. Open a cherry-pick PR
 
-Open a PR from `upstream-${NEW}` into `development`. The PR description must list:
+Open a PR from `upstream-${NEW}` into `main`. The PR description must list:
 
 - Every cherry-picked commit SHA, in order, with the upstream commit subject.
 - Every deliberately-skipped commit, with rationale (failed checklist item, conflict with fork-local change, deferred-for-later).

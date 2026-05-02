@@ -17,7 +17,7 @@ office = ["python-docx>=1.2.0,<2", "openpyxl>=3.1.5,<4"]
 `pip-audit` (2.10.0) and `osv-scanner` (2.3.5) — both run as part of Task 1.6
 and reproducible via `.github/workflows/audit.yml` — report zero CVEs against
 the pinned ranges as of the Phase 1 baseline. The audit workflow re-runs on
-every PR into `development` and weekly, so a future advisory against any of
+every PR into `main` and weekly, so a future advisory against any of
 these will fail CI before the parser path can be exercised against a hostile
 input on a vulnerable build.
 

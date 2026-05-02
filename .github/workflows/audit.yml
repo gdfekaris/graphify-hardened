@@ -5,7 +5,7 @@
 # Triggers:
 #   - Weekly cron (Mondays 09:00 UTC) so newly-disclosed CVEs against
 #     pinned versions surface even when the lockfile isn't changing.
-#   - PRs into `development` (this fork's working branch).
+#   - PRs into `main` (this fork's working branch).
 #   - Manual dispatch for ad-hoc runs.
 
 name: audit
@@ -14,7 +14,7 @@ on:
   schedule:
     - cron: '0 9 * * 1'
   pull_request:
-    branches: ["development"]
+    branches: ["main"]
   workflow_dispatch:
 
 jobs:

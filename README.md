@@ -436,7 +436,7 @@ The sections below describe how `graphify-hardened` differs from upstream `safis
 
 ## Differences from upstream
 
-The fork's working baseline is upstream commit `0999822` (one commit past `v0.5.7`). Each entry below names the implementing change; commit SHAs are on the `development` branch of this repo.
+The fork's working baseline is upstream commit `0999822` (one commit past `v0.5.7`). Each entry below names the implementing change; commit SHAs are on the `main` branch of this repo.
 
 **Phase 0 — Reduced optional-extra surface**
 
@@ -449,7 +449,7 @@ The fork's working baseline is upstream commit `0999822` (one commit past `v0.5.
 
 - `uv.lock` committed (105 packages resolved against Python 3.11) and removed from `.gitignore`.
 - Version specifiers tightened in `pyproject.toml`: tree-sitter language parsers pinned `==`, everything else lower+upper bounded.
-- New `.github/workflows/audit.yml` runs weekly + on PRs into `development` + manually, scanning the locked tree with `pip-audit==2.10.0` and `osv-scanner v2.3.5` (release binary, SHA256-verified). GitHub Actions SHA-pinned in both `audit.yml` and `ci.yml`.
+- New `.github/workflows/audit.yml` runs weekly + on PRs into `main` + manually, scanning the locked tree with `pip-audit==2.10.0` and `osv-scanner v2.3.5` (release binary, SHA256-verified). GitHub Actions SHA-pinned in both `audit.yml` and `ci.yml`.
 
 **Phase 2 — Vendored vis-network bundle**
 

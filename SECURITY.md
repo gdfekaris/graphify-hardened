@@ -133,6 +133,6 @@ Per-entry SHA256 sidecar at `<hash>.json.sha256`:
 
 - `graphify add <url>`, `graphify ingest`, `graphify clone <git-url>` — explicitly initiated by the user, gated by `validate_url` / `_parse_git_url`.
 - LLM-extraction (Anthropic / OpenAI / your platform's API): your platform's API endpoint, using your own API key. Skipped entirely when `--untrusted-corpus` is set.
-- `audit.yml` (CI only): pulls `pip-audit==2.10.0` and `osv-scanner v2.3.5` (release binary, SHA256-verified) on a weekly cron + on PRs into `development` + manually.
+- `audit.yml` (CI only): pulls `pip-audit==2.10.0` and `osv-scanner v2.3.5` (release binary, SHA256-verified) on a weekly cron + on PRs into `main` + manually.
 - PDF / DOCX / XLSX extraction: reads local files only.
 - Watch mode: local filesystem events only (`watchdog`).

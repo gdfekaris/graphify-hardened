@@ -1,6 +1,8 @@
 # graphify-hardened
 
-A security-hardened fork of [graphify](https://github.com/safishamsi/graphify) with pinned dependency versions, a committed `uv.lock`, automated CVE scanning in CI (`pip-audit` + `osv-scanner`), and a reduced surface area (optional extras with stale or unmaintained dependencies have been dropped). Everything below is from the upstream README.
+> **This is a hardened fork of [safishamsi/graphify](https://github.com/safishamsi/graphify).** For the upstream project and its features, see the original repo. The text up to the next "Hardened-fork additions" divider is the upstream README, lightly edited to remove references to dropped extras. The fork-specific material is at the bottom: [Differences from upstream](#differences-from-upstream), [When to use this fork vs. upstream](#when-to-use-this-fork-vs-upstream), [Trust model](#trust-model), [Environment variables](#environment-variables-hardened-fork-additions), and [CLI additions](#cli-additions-hardened-fork).
+>
+> **Working baseline:** upstream commit `0999822` (one commit past `v0.5.7`). See [`FORK.md`](FORK.md) for the per-extra keep/drop rationale and the upstream cherry-pick review process.
 
 ---
 
@@ -341,6 +343,17 @@ graphify watch  ./untrusted-clone --untrusted-corpus
 # `graphify add <url>` refuses to extend a graph that was built in
 # --untrusted-corpus mode unless --force is given.
 graphify add https://example.com/x --force
+
+# dry-run any install command — print the plan (CREATE / MODIFY with unified diff / NO-OP)
+# without touching the filesystem. Every install entry point accepts --dry-run.
+graphify install --dry-run
+graphify claude install --dry-run
+graphify codex install --dry-run
+
+# audit summary — flagged content (recent 5), graph mode (standard / UNTRUSTED-CORPUS),
+# recent 10 audit events, installed skills, git hooks
+graphify status
+graphify status --show-flagged-text     # surface original quarantined text (off by default)
 ```
 
 Works with any mix of file types:
@@ -414,6 +427,118 @@ Built for lawyers, consultants, executives, doctors, researchers — anyone whos
 ## What we are building next
 
 graphify is the graph layer. Penpax is the always-on layer on top of it — an on-device digital twin that connects your meetings, browser history, files, emails, and code into one continuously updating knowledge graph. No cloud, no training on your data. [Join the waitlist.](https://safishamsi.github.io/penpax.ai)
+
+---
+
+# Hardened-fork additions
+
+The sections below describe how `graphify-hardened` differs from upstream `safishamsi/graphify`. Everything above this divider is upstream content.
+
+## Differences from upstream
+
+The fork's working baseline is upstream commit `0999822` (one commit past `v0.5.7`). Each entry below names the implementing change; commit SHAs are on the `development` branch of this repo.
+
+**Phase 0 — Reduced optional-extra surface**
+
+- Dropped `[neo4j]` (pure export target; one fewer network-protocol-speaking dependency).
+- Dropped `[video]` (`yt-dlp` + `faster-whisper`): the user does not ingest media; the attack surface (yt-dlp `--exec` family CVE history, `huggingface.co` runtime model fetch, transitive `ffmpeg` codec parsers) is not justified. See `FORK.md`.
+- Dropped `[kimi]`: routes extraction through a second LLM provider; keeping a single trust surface.
+- Kept: `mcp`, `pdf`, `watch`, `svg`, `leiden`, `office`.
+
+**Phase 1 — Dependency hardening**
+
+- `uv.lock` committed (105 packages resolved against Python 3.11) and removed from `.gitignore`.
+- Version specifiers tightened in `pyproject.toml`: tree-sitter language parsers pinned `==`, everything else lower+upper bounded.
+- New `.github/workflows/audit.yml` runs weekly + on PRs into `development` + manually, scanning the locked tree with `pip-audit==2.10.0` and `osv-scanner v2.3.5` (release binary, SHA256-verified). GitHub Actions SHA-pinned in both `audit.yml` and `ci.yml`.
+
+**Phase 2 — Vendored vis-network bundle**
+
+- The interactive HTML output no longer loads `vis-network` from a third-party CDN. `vis-network@10.0.2` is vendored at `graphify/static/vis-network.min.js` after verifying the npm-published `dist.shasum` (sha1) and `dist.integrity` (sha512) against the downloaded bytes (`audit/vis-network-pin.txt`). Loaded via `importlib.resources` with a `</script` substring guard.
+- Added `_safe_href` helper for any future hyperlink emission and a `<meta http-equiv="Content-Security-Policy">` block to the generated HTML (`default-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'`; `'unsafe-eval'` intentionally omitted).
+- Routed edge `relation` / `confidence` and hyperedge `label` through `sanitize_label()`. Adversarial regression test in `tests/test_export.py`.
+
+**Phase 3 — Prompt-injection containment**
+
+- New `graphify/injection.py` with `flag_suspicious(text)` and 12 named heuristic patterns (imperative-ignore, role-injection markup, exfiltration instructions, jailbreak phrases, persona overrides).
+- `build.build_from_json` is the central choke point: free-text fields (label, rationale, summary) on every node are scanned; flagged content is redacted to `[FLAGGED — see graphify-out/.flagged.json]`, the node is tagged `flagged: True`, and the original is appended to `.flagged.json` with provenance and matched-pattern names.
+- Every node now carries `provenance: list[str]` (defaults to `[source_file]`); merges union provenance instead of overwriting.
+- An "untrusted-data framing" block is embedded in all 7 rules-file install constants and threaded into the 4 inline hook nudges. MCP `serve.py` prepends an untrusted-data prefix to every text-bearing handler (numeric-only handlers exempted).
+- New `--untrusted-corpus` mode for `graphify update` and `graphify watch` (and `graphify add` refuses to extend such a graph without `--force`). LLM-free: code goes through the AST extractor as usual; docs, papers, and images become metadata-only nodes (path + size + SHA256 + file_type — file contents are never read).
+
+**Phase 4 — External-input hardening**
+
+- `safe_fetch` gains a `GRAPHIFY_FETCH_ALLOWLIST` hostname allowlist (after the existing scheme/IP-range checks).
+- Default text-fetch cap lowered from 10 MB to 2 MB; `GRAPHIFY_MAX_TEXT_BYTES` env override clamped to a 50 MB hard ceiling.
+- Per-URL-type Content-Type validation in `ingest`; `GRAPHIFY_CONTENT_TYPE_STRICT=0` downgrades enforcement to a `RuntimeWarning`.
+- `git clone` / `git pull` URLs parsed with `urlsplit` (not `urlparse`, which strips `;params` from HTTP/HTTPS paths), owner/repo validated against `^[a-zA-Z0-9._-]+$` plus an explicit dot-only check, optional `GRAPHIFY_CLONE_ALLOWED_HOSTS` / `GRAPHIFY_CLONE_ALLOWED_OWNERS` gates, `--` separator before positional args, and 5 s / 300 s timeouts on the three subprocess sites (`audit/subprocess-review.md`).
+- Cache deserialization audit: zero pickle/marshal/dill/joblib usage; JSON-only with quiet demotion to a cache miss on malformed entries (`audit/deserialization-review.md`). Per-entry SHA256 sidecar (`<hash>.json.sha256`); hash mismatch logs an integrity event and treats the entry as a miss.
+- PDF parsing pre-checks file size (`GRAPHIFY_PDF_MAX_BYTES`, default 100 MB) and lowers `RLIMIT_AS` (`GRAPHIFY_PDF_MEMORY_CAP_BYTES`, default 2 GB) on Unix for the duration of pypdf parsing. Office (`.docx` / `.xlsx`) zip central directories are inspected before any decompression — non-zip files, archives over `GRAPHIFY_OFFICE_MAX_UNCOMPRESSED_BYTES` (default 200 MB), and archives with more than 10 000 entries are rejected (`audit/office-pdf-hardening.md`).
+- Anthropic / OpenAI SDK exceptions on auth failure are scrubbed of the API-key value before re-raising; chain-walking loggers do not see the original (`audit/api-key-handling-review.md`).
+
+**Phase 5 — Audit log**
+
+- New `graphify/audit.py`: `log_event` (best-effort) and `log_security_event` (fail-loud — file failure → stderr fallback → `AuditLogError` if both fail). Atomic append via `os.write` under `fcntl.flock(LOCK_EX)` on Unix; bare `O_APPEND` on Windows. Recursive secret-scrubbing (Bearer, `sk-`, `sk-ant-`, `gh[ps]_`, generic 32+ char tokens) applied to every record. Format and the per-action `details` allowlist documented in [`docs/AUDIT_LOG.md`](docs/AUDIT_LOG.md).
+- Wired into nine action families: `fetch_url`, `content_type_violation`, `quarantine_flagged`, `cache_integrity_failure`, `clone_repo`, `subprocess`, `install_hook` / `uninstall_hook`, `install_skill` / `uninstall_skill`.
+- New `graphify status` command surfaces the audit and quarantine state at a glance (flagged content, graph mode, recent 10 audit events, installed skills, git hooks).
+
+**Phase 6 — Skill installer hardening**
+
+- `graphify install --dry-run` plans every install action (CREATE / MODIFY with unified diff / NO-OP) without touching the filesystem. Every install entry point splits into `plan_<X>()` + `<X>()`.
+- Top-level `graphify install --platform <P>` for kiro / cursor / gemini / antigravity now routes through the dedicated subcommand entirely (eliminates orphan home-skill writes that those platforms never read); for codex / opencode / aider / claw / droid / trae / trae-cn / hermes the top-level chains into `_agents_install` after the home skill copy so the framing-bearing rules file always lands.
+- Idempotent uninstall fix for codex (`_agents_uninstall(_, platform="codex")` now removes the codex hook from `.codex/hooks.json`, mirroring the opencode branch).
+
+**Phase 7 — Hardening regression tests**
+
++70 tests covering: SSRF redirect chains (`file://`, RFC1918, IMDS, link-local, A→B→metadata), `uv.lock` drift, vendored-bundle adversarial HTML, install round-trip cleanup, prompt-injection end-to-end (build → `graph.json` → MCP), subprocess argument-injection vectors (shell metachars, option-prefix smuggling, SCP-form, path traversal, missing `--`, missing timeouts), cache deserialization (AST scan + tamper + pickle-gadget under tripwires), audit-logger fail-loud + scrubbing.
+
+## When to use this fork vs. upstream
+
+**Use upstream `safishamsi/graphify`** if you want the fastest release cadence, all optional features (including `[neo4j]`, `[video]`, `[kimi]`), the original interactive HTML built around the `vis-network` CDN, and you are comfortable with the LLM-extraction model running over arbitrary corpus content.
+
+**Use this fork** if any of the following matter to you:
+
+- You run graphify on third-party content you do not fully trust (open-source repos, scraped papers, downloaded archives) and want indirect prompt injection through extracted nodes contained rather than ignored.
+- You want a committed `uv.lock`, dependency CVE scanning in CI, and a reduced optional-extra surface.
+- You want a vendored `vis-network` bundle (no third-party CDN at HTML render time) with CSP applied to the generated output.
+- You want an audit log of security-relevant operations (URL fetches, repo clones, skill installs, cache integrity failures).
+- You want a `--dry-run` flag on every install path and a `graphify status` command to inspect flagged content, audit history, and installed surfaces.
+
+**Tradeoffs.** Slower release cadence — upstream changes are pulled in monthly by manual cherry-pick after diff review (see [`FORK.md`](FORK.md)). No `[video]` / `[kimi]` / `[neo4j]` extras. The default `safe_fetch_text` cap is lower (2 MB vs. upstream 10 MB; raise via `GRAPHIFY_MAX_TEXT_BYTES`). The audit log is **not tamper-evident**; an attacker with local write access to `graphify-out/.audit.log` can rewrite history. Tamper-evidence (HMAC chain, remote shipping) is out of scope for a local-only tool.
+
+**Use neither** if you process untrusted media (audio/video files from arbitrary sources). The upstream `[video]` extra is dropped here, and neither fork sandboxes ffmpeg / yt-dlp at the OS level.
+
+## Trust model
+
+**Running graphify on third-party content gives that content's authors persistent injection access to your assistant via the always-on hook.** Every file in the corpus passes through an LLM-extraction stage; the resulting node labels, rationale text, community names, and summaries are persisted to `GRAPH_REPORT.md` and re-injected into your assistant's context on every turn. A hostile README, paper, or image caption can plant instructions that the assistant sees indefinitely.
+
+This fork mitigates this with three layered defences:
+
+1. **Heuristic flagging at build time** (`graphify/injection.py`) scans every free-text field for 12 known injection-pattern families (imperative-ignore, role-injection markup, exfiltration instructions, jailbreak phrases, persona overrides) and redacts matches to a quarantine placeholder. The original is recorded in `graphify-out/.flagged.json` with provenance and matched-pattern names.
+2. **Untrusted-data framing** is embedded in every rules file installed by `graphify *install` (CLAUDE.md, AGENTS.md, GEMINI.md, `.cursor/rules/`, `.kiro/steering/`, `.agents/rules/`, `.github/copilot-instructions.md`) telling the assistant to treat the report and wiki as **data**, not instructions, and to surface suspicious content as a possible prompt-injection attempt rather than acting on it.
+3. **`--untrusted-corpus` mode** for cases where the heuristic is not enough. In this mode the entire LLM-extraction pass is skipped: code goes through the AST extractor as usual, but docs, papers, and images become metadata-only nodes (path + size + SHA256 + file_type — file contents are never read). The graph is structurally smaller but carries zero LLM-generated text from the corpus, so a hostile file cannot inject instructions into your assistant. Re-run without the flag once you have read the contents and trust them.
+
+**No heuristic is complete.** If you do not trust the corpus, use `--untrusted-corpus` until you have read the contents and trust them. Treat `graphify-out/GRAPH_REPORT.md` and `graphify-out/wiki/` as untrusted data even on a corpus you mostly trust.
+
+## Environment variables (hardened-fork additions)
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `GRAPHIFY_FETCH_ALLOWLIST` | unset | Comma-separated hostname allowlist for `safe_fetch`. Empty / unset = no allowlist gate (existing scheme and private-IP-range checks still apply). |
+| `GRAPHIFY_MAX_TEXT_BYTES` | `2097152` (2 MB) | Override the text-fetch cap. Hard ceiling 50 MB. Non-positive or malformed values raise `ValueError`. |
+| `GRAPHIFY_CONTENT_TYPE_STRICT` | `1` | When `0`, Content-Type mismatches in `ingest` are downgraded to `RuntimeWarning` instead of raising. |
+| `GRAPHIFY_CLONE_ALLOWED_HOSTS` | unset | Comma-separated host allowlist for `graphify clone` / `graphify add` git URLs. AND-combined with `GRAPHIFY_CLONE_ALLOWED_OWNERS`. |
+| `GRAPHIFY_CLONE_ALLOWED_OWNERS` | unset | Comma-separated owner allowlist for `graphify clone` / `graphify add` git URLs. |
+| `GRAPHIFY_PDF_MAX_BYTES` | `104857600` (100 MB) | File-size pre-check before pypdf parses a PDF. |
+| `GRAPHIFY_PDF_MEMORY_CAP_BYTES` | `2147483648` (2 GB) | Address-space cap (`RLIMIT_AS`) for pypdf parsing on Unix. No-op on Windows. |
+| `GRAPHIFY_OFFICE_MAX_UNCOMPRESSED_BYTES` | `209715200` (200 MB) | Total-uncompressed-size cap on `.docx` / `.xlsx` zip central directories. Archives with more than 10 000 entries or that are not valid zips are also rejected. |
+| `GRAPHIFY_AUDIT_LOG_PATH` | `graphify-out/.audit.log` | Override the audit log path. Primarily for test isolation — production behaviour is unchanged when unset. |
+
+## CLI additions (hardened-fork)
+
+- `graphify update <path> --untrusted-corpus` and `graphify watch <path> --untrusted-corpus` build an LLM-free graph (AST + metadata-only nodes for non-code files). Persisted into the graph as a `mode` attribute.
+- `graphify add <url>` refuses to extend an untrusted-corpus graph unless `--force` is given.
+- `graphify <any-install-command> --dry-run` prints the install plan (CREATE byte counts / MODIFY unified diffs / NO-OP) without touching the filesystem and without emitting audit events. Available on every install entry point.
+- `graphify status` prints flagged content (count + recent 5), graph mode (standard / `UNTRUSTED-CORPUS`), the most recent 10 audit events, installed skills, and git-hook state. `--show-flagged-text` surfaces original quarantined text (off by default; the placeholder lists the count and pattern families without leaking the injection payload).
 
 <details>
 <summary>Contributing</summary>

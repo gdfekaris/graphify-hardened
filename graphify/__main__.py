@@ -8,6 +8,13 @@ import shutil
 import sys
 from pathlib import Path
 
+from .install_plan import (
+    Action,
+    apply_plan,
+    modified_paths,
+    render_plan,
+)
+
 try:
     from importlib.metadata import version as _pkg_version
     __version__ = _pkg_version("graphifyy")
@@ -216,12 +223,55 @@ _PLATFORM_CONFIG: dict[str, dict] = {
 }
 
 
-def install(platform: str = "claude") -> None:
+def _resolve_skill_dst(platform: str, cfg: dict) -> Path:
+    """Resolve the on-disk path where the skill file should live for ``platform``."""
+    if platform in ("claude", "windows") and os.environ.get("CLAUDE_CONFIG_DIR"):
+        return Path(os.environ["CLAUDE_CONFIG_DIR"]) / "skills" / "graphify" / "SKILL.md"
+    return Path.home() / cfg["skill_dst"]
+
+
+def plan_install(platform: str) -> list[Action]:
+    """Compute the Actions for ``graphify install --platform <P>``.
+
+    Covers: skill file copy, .graphify_version sidecar, ``~/.claude/CLAUDE.md``
+    registration line for claude/windows, opencode plugin + opencode.json
+    registration. Excludes the cross-platform version-stamp refresh — that
+    is a side-effect handled by ``_refresh_all_version_stamps`` after apply.
+    """
+    cfg = _PLATFORM_CONFIG[platform]
+    skill_src = Path(__file__).parent / cfg["skill_file"]
+    if not skill_src.exists():
+        raise FileNotFoundError(
+            f"{cfg['skill_file']} not found in package - reinstall graphify"
+        )
+
+    actions: list[Action] = []
+
+    skill_dst = _resolve_skill_dst(platform, cfg)
+    actions.append(Action(skill_dst, skill_src.read_text(encoding="utf-8")))
+    actions.append(Action(skill_dst.parent / ".graphify_version", __version__))
+
+    if cfg["claude_md"]:
+        claude_md = Path.home() / ".claude" / "CLAUDE.md"
+        if claude_md.exists():
+            content = claude_md.read_text(encoding="utf-8")
+            if "graphify" not in content:
+                actions.append(Action(claude_md, content.rstrip() + _SKILL_REGISTRATION))
+        else:
+            actions.append(Action(claude_md, _SKILL_REGISTRATION.lstrip()))
+
+    if platform == "opencode":
+        actions.extend(plan_install_opencode_plugin(Path(".")))
+
+    return actions
+
+
+def install(platform: str = "claude", *, dry_run: bool = False) -> None:
     if platform == "gemini":
-        gemini_install()
+        gemini_install(dry_run=dry_run)
         return
     if platform == "cursor":
-        _cursor_install(Path("."))
+        _cursor_install(Path("."), dry_run=dry_run)
         return
     if platform not in _PLATFORM_CONFIG:
         print(
@@ -230,50 +280,67 @@ def install(platform: str = "claude") -> None:
         )
         sys.exit(1)
 
-    cfg = _PLATFORM_CONFIG[platform]
-    skill_src = Path(__file__).parent / cfg["skill_file"]
-    if not skill_src.exists():
-        print(f"error: {cfg['skill_file']} not found in package - reinstall graphify", file=sys.stderr)
+    try:
+        actions = plan_install(platform)
+    except FileNotFoundError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    paths: list[Path | str] = []
-    import os as _os
-    if platform in ("claude", "windows") and _os.environ.get("CLAUDE_CONFIG_DIR"):
-        _claude_base = Path(_os.environ["CLAUDE_CONFIG_DIR"])
-        skill_dst = _claude_base / "skills" / "graphify" / "SKILL.md"
-    else:
-        skill_dst = Path.home() / cfg["skill_dst"]
-    skill_dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy(skill_src, skill_dst)
-    (skill_dst.parent / ".graphify_version").write_text(__version__, encoding="utf-8")
-    paths.append(skill_dst)
+    if dry_run:
+        print(render_plan(actions, header=f"=== plan: graphify install --platform {platform} ==="))
+        return
+
+    cfg = _PLATFORM_CONFIG[platform]
+    results = apply_plan(actions)
+    paths = modified_paths(results)
+
+    skill_dst = _resolve_skill_dst(platform, cfg)
     print(f"  skill installed  ->  {skill_dst}")
 
     if cfg["claude_md"]:
-        # Register in ~/.claude/CLAUDE.md (Claude Code only)
         claude_md = Path.home() / ".claude" / "CLAUDE.md"
-        if claude_md.exists():
-            content = claude_md.read_text(encoding="utf-8")
-            if "graphify" in content:
-                print(f"  CLAUDE.md        ->  already registered (no change)")
+        if claude_md in paths:
+            # Two cases: created (didn't exist) or modified (appended). The
+            # planner only emits an Action when the marker is missing, so
+            # the path being in `paths` always means a change happened.
+            if any(r.action.path == claude_md and r.status == "created" for r in results):
+                print(f"  CLAUDE.md        ->  created at {claude_md}")
             else:
-                claude_md.write_text(content.rstrip() + _SKILL_REGISTRATION, encoding="utf-8")
-                paths.append(claude_md)
                 print(f"  CLAUDE.md        ->  skill registered in {claude_md}")
         else:
-            claude_md.parent.mkdir(parents=True, exist_ok=True)
-            claude_md.write_text(_SKILL_REGISTRATION.lstrip(), encoding="utf-8")
-            paths.append(claude_md)
-            print(f"  CLAUDE.md        ->  created at {claude_md}")
+            print(f"  CLAUDE.md        ->  already registered (no change)")
 
     if platform == "opencode":
-        _install_opencode_plugin(Path("."))
+        # Mirror the per-file status messages emitted by the original
+        # _install_opencode_plugin so the CLI output stays the same.
+        plugin_file = Path(".") / _OPENCODE_PLUGIN_PATH
+        config_file = Path(".") / _OPENCODE_CONFIG_PATH
+        if plugin_file in paths:
+            print(f"  {_OPENCODE_PLUGIN_PATH}  ->  tool.execute.before hook written")
+        if config_file in paths:
+            print(f"  {_OPENCODE_CONFIG_PATH}  ->  plugin registered")
+        else:
+            print(f"  {_OPENCODE_CONFIG_PATH}  ->  plugin already registered (no change)")
 
     # Refresh version stamps in all other previously-installed skill dirs so
     # stale-version warnings don't fire for platforms not explicitly re-installed.
     _refresh_all_version_stamps()
 
-    _audit_install(platform, paths)
+    if paths:
+        # Split paths so opencode plugin writes are audited as install_hook
+        # rather than install_skill (matches pre-refactor behavior — the old
+        # `_install_opencode_plugin` emitted its own install_hook event).
+        opencode_paths = [
+            p for p in paths
+            if platform == "opencode" and (
+                p == Path(".") / _OPENCODE_PLUGIN_PATH or p == Path(".") / _OPENCODE_CONFIG_PATH
+            )
+        ]
+        skill_paths = [p for p in paths if p not in opencode_paths]
+        if skill_paths:
+            _audit_install(platform, skill_paths)
+        if opencode_paths:
+            _audit_hook_install("opencode", opencode_paths)
 
     print()
     print("Done. Open your AI coding assistant and type:")
@@ -346,47 +413,71 @@ _GEMINI_HOOK = {
 }
 
 
-def gemini_install(project_dir: Path | None = None) -> None:
-    """Copy skill file to ~/.gemini/skills/graphify/, write GEMINI.md section, and install BeforeTool hook."""
-    paths: list[Path | str] = []
-    # Copy skill file to ~/.gemini/skills/graphify/SKILL.md
-    # On Windows, Gemini CLI prioritises ~/.agents/skills/ over ~/.gemini/skills/
-    skill_src = Path(__file__).parent / "skill.md"
+def _gemini_skill_dst() -> Path:
+    """Resolve the on-disk path for the Gemini skill (Windows uses .agents)."""
     if platform.system() == "Windows":
-        skill_dst = Path.home() / ".agents" / "skills" / "graphify" / "SKILL.md"
-    else:
-        skill_dst = Path.home() / ".gemini" / "skills" / "graphify" / "SKILL.md"
-    skill_dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy(skill_src, skill_dst)
-    (skill_dst.parent / ".graphify_version").write_text(__version__, encoding="utf-8")
-    paths.append(skill_dst)
-    print(f"  skill installed  ->  {skill_dst}")
+        return Path.home() / ".agents" / "skills" / "graphify" / "SKILL.md"
+    return Path.home() / ".gemini" / "skills" / "graphify" / "SKILL.md"
 
-    target = (project_dir or Path(".")) / "GEMINI.md"
 
+def plan_gemini_install(project_dir: Path) -> list[Action]:
+    """Compute Actions for `graphify gemini install`: skill, GEMINI.md, hook."""
+    actions: list[Action] = []
+    skill_src = Path(__file__).parent / "skill.md"
+    skill_dst = _gemini_skill_dst()
+    actions.append(Action(skill_dst, skill_src.read_text(encoding="utf-8")))
+    actions.append(Action(skill_dst.parent / ".graphify_version", __version__))
+
+    target = project_dir / "GEMINI.md"
     if target.exists():
         content = target.read_text(encoding="utf-8")
-        if _GEMINI_MD_MARKER in content:
-            print("graphify already configured in GEMINI.md")
-        else:
-            target.write_text(content.rstrip() + "\n\n" + _GEMINI_MD_SECTION, encoding="utf-8")
-            paths.append(target)
-            print(f"graphify section written to {target.resolve()}")
+        if _GEMINI_MD_MARKER not in content:
+            actions.append(Action(target, content.rstrip() + "\n\n" + _GEMINI_MD_SECTION))
     else:
-        target.write_text(_GEMINI_MD_SECTION, encoding="utf-8")
-        paths.append(target)
-        print(f"graphify section written to {target.resolve()}")
+        actions.append(Action(target, _GEMINI_MD_SECTION))
 
-    _install_gemini_hook(project_dir or Path("."))
-    _audit_install("gemini", paths)
+    actions.extend(plan_install_gemini_hook(project_dir))
+    return actions
+
+
+def gemini_install(project_dir: Path | None = None, *, dry_run: bool = False) -> None:
+    """Copy skill file to ~/.gemini/skills/graphify/, write GEMINI.md section, and install BeforeTool hook."""
+    project_dir = project_dir or Path(".")
+    actions = plan_gemini_install(project_dir)
+    if dry_run:
+        print(render_plan(actions, header="=== plan: graphify gemini install ==="))
+        return
+
+    results = apply_plan(actions)
+    paths = modified_paths(results)
+
+    skill_dst = _gemini_skill_dst()
+    target = project_dir / "GEMINI.md"
+    settings_path = project_dir / ".gemini" / "settings.json"
+
+    print(f"  skill installed  ->  {skill_dst}")
+    if target in paths:
+        print(f"graphify section written to {target.resolve()}")
+    else:
+        print("graphify already configured in GEMINI.md")
+    if settings_path in paths:
+        print("  .gemini/settings.json  ->  BeforeTool hook registered")
+
+    skill_paths = [p for p in paths if p != settings_path]
+    hook_paths = [p for p in paths if p == settings_path]
+    if skill_paths:
+        _audit_install("gemini", skill_paths)
+    if hook_paths:
+        _audit_hook_install("gemini", hook_paths)
+
     print()
     print("Gemini CLI will now check the knowledge graph before answering")
     print("codebase questions and rebuild it after code changes.")
 
 
-def _install_gemini_hook(project_dir: Path) -> None:
+def plan_install_gemini_hook(project_dir: Path) -> list[Action]:
+    """Compute the Action(s) needed to register the gemini BeforeTool hook."""
     settings_path = project_dir / ".gemini" / "settings.json"
-    settings_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         settings = json.loads(settings_path.read_text(encoding="utf-8")) if settings_path.exists() else {}
     except json.JSONDecodeError:
@@ -394,8 +485,15 @@ def _install_gemini_hook(project_dir: Path) -> None:
     before_tool = settings.setdefault("hooks", {}).setdefault("BeforeTool", [])
     settings["hooks"]["BeforeTool"] = [h for h in before_tool if "graphify" not in str(h)]
     settings["hooks"]["BeforeTool"].append(_GEMINI_HOOK)
-    settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
-    _audit_hook_install("gemini", [settings_path])
+    return [Action(settings_path, json.dumps(settings, indent=2))]
+
+
+def _install_gemini_hook(project_dir: Path) -> None:
+    actions = plan_install_gemini_hook(project_dir)
+    results = apply_plan(actions)
+    paths = modified_paths(results)
+    if paths:
+        _audit_hook_install("gemini", paths)
     print("  .gemini/settings.json  ->  BeforeTool hook registered")
 
 
@@ -472,35 +570,48 @@ Type `/graphify` in Copilot Chat to build or update the knowledge graph.
 """ + _UNTRUSTED_FRAMING
 
 
-def vscode_install(project_dir: Path | None = None) -> None:
-    """Install graphify skill for VS Code Copilot Chat + write .github/copilot-instructions.md."""
-    paths: list[Path | str] = []
+def plan_vscode_install(project_dir: Path) -> list[Action]:
+    """Compute Actions for `graphify vscode install`: skill + copilot-instructions.md."""
+    actions: list[Action] = []
     skill_src = Path(__file__).parent / "skill-vscode.md"
     if not skill_src.exists():
         skill_src = Path(__file__).parent / "skill-copilot.md"
     skill_dst = Path.home() / ".copilot" / "skills" / "graphify" / "SKILL.md"
-    skill_dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy(skill_src, skill_dst)
-    (skill_dst.parent / ".graphify_version").write_text(__version__, encoding="utf-8")
-    paths.append(skill_dst)
-    print(f"  skill installed  ->  {skill_dst}")
+    actions.append(Action(skill_dst, skill_src.read_text(encoding="utf-8")))
+    actions.append(Action(skill_dst.parent / ".graphify_version", __version__))
 
-    instructions = (project_dir or Path(".")) / ".github" / "copilot-instructions.md"
-    instructions.parent.mkdir(parents=True, exist_ok=True)
+    instructions = project_dir / ".github" / "copilot-instructions.md"
     if instructions.exists():
         content = instructions.read_text(encoding="utf-8")
-        if _VSCODE_INSTRUCTIONS_MARKER in content:
-            print(f"  {instructions}  ->  already configured (no change)")
+        if _VSCODE_INSTRUCTIONS_MARKER not in content:
+            actions.append(Action(instructions, content.rstrip() + "\n\n" + _VSCODE_INSTRUCTIONS_SECTION))
+    else:
+        actions.append(Action(instructions, _VSCODE_INSTRUCTIONS_SECTION))
+    return actions
+
+
+def vscode_install(project_dir: Path | None = None, *, dry_run: bool = False) -> None:
+    """Install graphify skill for VS Code Copilot Chat + write .github/copilot-instructions.md."""
+    project_dir = project_dir or Path(".")
+    actions = plan_vscode_install(project_dir)
+    if dry_run:
+        print(render_plan(actions, header="=== plan: graphify vscode install ==="))
+        return
+
+    results = apply_plan(actions)
+    paths = modified_paths(results)
+    skill_dst = Path.home() / ".copilot" / "skills" / "graphify" / "SKILL.md"
+    instructions = project_dir / ".github" / "copilot-instructions.md"
+    print(f"  skill installed  ->  {skill_dst}")
+    if instructions in paths:
+        if any(r.action.path == instructions and r.status == "created" for r in results):
+            print(f"  {instructions}  ->  created")
         else:
-            instructions.write_text(content.rstrip() + "\n\n" + _VSCODE_INSTRUCTIONS_SECTION, encoding="utf-8")
-            paths.append(instructions)
             print(f"  {instructions}  ->  graphify section added")
     else:
-        instructions.write_text(_VSCODE_INSTRUCTIONS_SECTION, encoding="utf-8")
-        paths.append(instructions)
-        print(f"  {instructions}  ->  created")
-
-    _audit_install("vscode", paths)
+        print(f"  {instructions}  ->  already configured (no change)")
+    if paths:
+        _audit_install("vscode", paths)
     print()
     print("VS Code Copilot Chat configured. Type /graphify in the chat panel to build the graph.")
     print("Note: for GitHub Copilot CLI (terminal), use: graphify copilot install")
@@ -587,31 +698,38 @@ and surprising connections the graph found. Navigate by graph structure instead 
 _KIRO_STEERING_MARKER = "graphify: A knowledge graph of this project"
 
 
-def _kiro_install(project_dir: Path) -> None:
-    """Write graphify skill + steering file for Kiro IDE/CLI."""
-    project_dir = project_dir or Path(".")
-    paths: list[Path | str] = []
-
-    # Skill file → .kiro/skills/graphify/SKILL.md
+def plan_kiro_install(project_dir: Path) -> list[Action]:
+    """Compute Actions for `graphify kiro install`: skill + steering file."""
+    actions: list[Action] = []
     skill_src = Path(__file__).parent / "skill-kiro.md"
     skill_dst = project_dir / ".kiro" / "skills" / "graphify" / "SKILL.md"
-    skill_dst.parent.mkdir(parents=True, exist_ok=True)
-    skill_dst.write_text(skill_src.read_text(encoding="utf-8"), encoding="utf-8")
-    paths.append(skill_dst)
+    actions.append(Action(skill_dst, skill_src.read_text(encoding="utf-8")))
+
+    steering_dst = project_dir / ".kiro" / "steering" / "graphify.md"
+    if not (steering_dst.exists() and _KIRO_STEERING_MARKER in steering_dst.read_text(encoding="utf-8")):
+        actions.append(Action(steering_dst, _KIRO_STEERING))
+    return actions
+
+
+def _kiro_install(project_dir: Path, *, dry_run: bool = False) -> None:
+    """Write graphify skill + steering file for Kiro IDE/CLI."""
+    project_dir = project_dir or Path(".")
+    actions = plan_kiro_install(project_dir)
+    if dry_run:
+        print(render_plan(actions, header="=== plan: graphify kiro install ==="))
+        return
+
+    results = apply_plan(actions)
+    paths = modified_paths(results)
+    skill_dst = project_dir / ".kiro" / "skills" / "graphify" / "SKILL.md"
+    steering_dst = project_dir / ".kiro" / "steering" / "graphify.md"
     print(f"  {skill_dst.relative_to(project_dir)}  ->  /graphify skill")
-
-    # Steering file → .kiro/steering/graphify.md (always-on)
-    steering_dir = project_dir / ".kiro" / "steering"
-    steering_dir.mkdir(parents=True, exist_ok=True)
-    steering_dst = steering_dir / "graphify.md"
-    if steering_dst.exists() and _KIRO_STEERING_MARKER in steering_dst.read_text(encoding="utf-8"):
-        print(f"  .kiro/steering/graphify.md  ->  already configured")
-    else:
-        steering_dst.write_text(_KIRO_STEERING, encoding="utf-8")
-        paths.append(steering_dst)
+    if steering_dst in paths:
         print(f"  .kiro/steering/graphify.md  ->  always-on steering written")
-
-    _audit_install("kiro", paths)
+    else:
+        print(f"  .kiro/steering/graphify.md  ->  already configured")
+    if paths:
+        _audit_install("kiro", paths)
     print()
     print("Kiro will now read the knowledge graph before every conversation.")
     print("Use /graphify to build or update the graph.")
@@ -644,43 +762,70 @@ def _kiro_uninstall(project_dir: Path) -> None:
     print("Removed: " + (", ".join(removed) if removed else "nothing to remove"))
 
 
-def _antigravity_install(project_dir: Path) -> None:
-    """Install graphify for Google Antigravity: skill + .agents/rules + .agents/workflows."""
-    paths: list[Path | str] = []
-    # 1. Copy skill file to ~/.agents/skills/graphify/SKILL.md
-    # Note: install() emits its own install_skill event for the generic skill copy.
-    # We emit a separate one here for the Antigravity-specific files.
-    install(platform="antigravity")
+_ANTIGRAVITY_FRONTMATTER = (
+    "---\n"
+    "name: graphify-manager\n"
+    "description: Rebuild the code graph or perform manual CLI queries when MCP server is offline.\n"
+    "---\n\n"
+)
 
-    # 1.5. Inject YAML frontmatter for native Antigravity tool discovery
-    skill_dst = Path.home() / _PLATFORM_CONFIG["antigravity"]["skill_dst"]
-    if skill_dst.exists():
-        content = skill_dst.read_text(encoding="utf-8")
-        if not content.startswith("---\n"):
-            frontmatter = "---\nname: graphify-manager\ndescription: Rebuild the code graph or perform manual CLI queries when MCP server is offline.\n---\n\n"
-            skill_dst.write_text(frontmatter + content, encoding="utf-8")
 
-    # 2. Write .agents/rules/graphify.md
+def plan_antigravity_install(project_dir: Path) -> list[Action]:
+    """Compute Actions for `graphify antigravity install`: skill + rules + workflow.
+
+    Bakes the YAML-frontmatter conditional from the original installer into
+    the planner: if the source skill file does not already start with
+    ``---\\n`` it gets prepended, otherwise the existing frontmatter is
+    preserved.
+    """
+    actions: list[Action] = []
+    cfg = _PLATFORM_CONFIG["antigravity"]
+    skill_src = Path(__file__).parent / cfg["skill_file"]
+    skill_dst = Path.home() / cfg["skill_dst"]
+    skill_content = skill_src.read_text(encoding="utf-8")
+    if not skill_content.startswith("---\n"):
+        skill_content = _ANTIGRAVITY_FRONTMATTER + skill_content
+    actions.append(Action(skill_dst, skill_content))
+    actions.append(Action(skill_dst.parent / ".graphify_version", __version__))
+
     rules_path = project_dir / _ANTIGRAVITY_RULES_PATH
-    rules_path.parent.mkdir(parents=True, exist_ok=True)
-    if rules_path.exists():
-        print(f"graphify rule already exists at {rules_path} (no change)")
-    else:
-        rules_path.write_text(_ANTIGRAVITY_RULES, encoding="utf-8")
-        paths.append(rules_path)
-        print(f"graphify rule written to {rules_path.resolve()}")
+    if not rules_path.exists():
+        actions.append(Action(rules_path, _ANTIGRAVITY_RULES))
 
-    # 3. Write .agents/workflows/graphify.md
     wf_path = project_dir / _ANTIGRAVITY_WORKFLOW_PATH
-    wf_path.parent.mkdir(parents=True, exist_ok=True)
-    if wf_path.exists():
-        print(f"graphify workflow already exists at {wf_path} (no change)")
-    else:
-        wf_path.write_text(_ANTIGRAVITY_WORKFLOW, encoding="utf-8")
-        paths.append(wf_path)
-        print(f"graphify workflow written to {wf_path.resolve()}")
+    if not wf_path.exists():
+        actions.append(Action(wf_path, _ANTIGRAVITY_WORKFLOW))
 
-    _audit_install("antigravity", paths)
+    return actions
+
+
+def _antigravity_install(project_dir: Path, *, dry_run: bool = False) -> None:
+    """Install graphify for Google Antigravity: skill + .agents/rules + .agents/workflows."""
+    actions = plan_antigravity_install(project_dir)
+    if dry_run:
+        print(render_plan(actions, header="=== plan: graphify antigravity install ==="))
+        return
+
+    results = apply_plan(actions)
+    paths = modified_paths(results)
+    skill_dst = Path.home() / _PLATFORM_CONFIG["antigravity"]["skill_dst"]
+    rules_path = project_dir / _ANTIGRAVITY_RULES_PATH
+    wf_path = project_dir / _ANTIGRAVITY_WORKFLOW_PATH
+
+    print(f"  skill installed  ->  {skill_dst}")
+    if rules_path in paths:
+        print(f"graphify rule written to {rules_path.resolve()}")
+    else:
+        print(f"graphify rule already exists at {rules_path} (no change)")
+    if wf_path in paths:
+        print(f"graphify workflow written to {wf_path.resolve()}")
+    else:
+        print(f"graphify workflow already exists at {wf_path} (no change)")
+
+    _refresh_all_version_stamps()
+
+    if paths:
+        _audit_install("antigravity", paths)
 
     print()
     print("Antigravity will now check the knowledge graph before answering")
@@ -746,15 +891,31 @@ This project has a graphify knowledge graph at graphify-out/.
 """ + _UNTRUSTED_FRAMING
 
 
-def _cursor_install(project_dir: Path) -> None:
-    """Write .cursor/rules/graphify.mdc with alwaysApply: true."""
-    rule_path = (project_dir or Path(".")) / _CURSOR_RULE_PATH
-    rule_path.parent.mkdir(parents=True, exist_ok=True)
+def plan_cursor_install(project_dir: Path) -> list[Action]:
+    """Compute Actions for `graphify cursor install`. Empty if the rule
+    already exists — the original installer skipped re-write to preserve
+    user customisations."""
+    rule_path = project_dir / _CURSOR_RULE_PATH
     if rule_path.exists():
+        return []
+    return [Action(rule_path, _CURSOR_RULE)]
+
+
+def _cursor_install(project_dir: Path, *, dry_run: bool = False) -> None:
+    """Write .cursor/rules/graphify.mdc with alwaysApply: true."""
+    project_dir = project_dir or Path(".")
+    actions = plan_cursor_install(project_dir)
+    if dry_run:
+        print(render_plan(actions, header="=== plan: graphify cursor install ==="))
+        return
+    rule_path = project_dir / _CURSOR_RULE_PATH
+    if not actions:
         print(f"graphify rule already exists at {rule_path} (no change)")
         return
-    rule_path.write_text(_CURSOR_RULE, encoding="utf-8")
-    _audit_install("cursor", [rule_path])
+    results = apply_plan(actions)
+    paths = modified_paths(results)
+    if paths:
+        _audit_install("cursor", paths)
     print(f"graphify rule written to {rule_path.resolve()}")
     print()
     print("Cursor will now always include the knowledge graph context.")
@@ -803,14 +964,11 @@ _OPENCODE_PLUGIN_PATH = Path(".opencode") / "plugins" / "graphify.js"
 _OPENCODE_CONFIG_PATH = Path(".opencode") / "opencode.json"
 
 
-def _install_opencode_plugin(project_dir: Path) -> None:
-    """Write graphify.js plugin and register it in opencode.json."""
-    paths: list[Path | str] = []
+def plan_install_opencode_plugin(project_dir: Path) -> list[Action]:
+    """Compute Actions for opencode plugin file + opencode.json registration."""
+    actions: list[Action] = []
     plugin_file = project_dir / _OPENCODE_PLUGIN_PATH
-    plugin_file.parent.mkdir(parents=True, exist_ok=True)
-    plugin_file.write_text(_OPENCODE_PLUGIN_JS, encoding="utf-8")
-    paths.append(plugin_file)
-    print(f"  {_OPENCODE_PLUGIN_PATH}  ->  tool.execute.before hook written")
+    actions.append(Action(plugin_file, _OPENCODE_PLUGIN_JS))
 
     config_file = project_dir / _OPENCODE_CONFIG_PATH
     if config_file.exists():
@@ -820,17 +978,30 @@ def _install_opencode_plugin(project_dir: Path) -> None:
             config = {}
     else:
         config = {}
-
     plugins = config.setdefault("plugin", [])
     entry = _OPENCODE_PLUGIN_PATH.as_posix()
     if entry not in plugins:
         plugins.append(entry)
-        config_file.write_text(json.dumps(config, indent=2), encoding="utf-8")
-        paths.append(config_file)
+        actions.append(Action(config_file, json.dumps(config, indent=2)))
+    return actions
+
+
+def _install_opencode_plugin(project_dir: Path) -> None:
+    """Write graphify.js plugin and register it in opencode.json."""
+    actions = plan_install_opencode_plugin(project_dir)
+    results = apply_plan(actions)
+    paths = modified_paths(results)
+    plugin_file = project_dir / _OPENCODE_PLUGIN_PATH
+    config_file = project_dir / _OPENCODE_CONFIG_PATH
+    # Plugin file is always part of the plan; print status reflects what
+    # happened rather than always claiming "written".
+    print(f"  {_OPENCODE_PLUGIN_PATH}  ->  tool.execute.before hook written")
+    if config_file in paths:
         print(f"  {_OPENCODE_CONFIG_PATH}  ->  plugin registered")
     else:
         print(f"  {_OPENCODE_CONFIG_PATH}  ->  plugin already registered (no change)")
-    _audit_hook_install("opencode", paths)
+    if paths:
+        _audit_hook_install("opencode", paths)
 
 
 def _uninstall_opencode_plugin(project_dir: Path) -> None:
@@ -886,11 +1057,9 @@ _CODEX_HOOK = {
 }
 
 
-def _install_codex_hook(project_dir: Path) -> None:
-    """Add graphify PreToolUse hook to .codex/hooks.json."""
+def plan_install_codex_hook(project_dir: Path) -> list[Action]:
+    """Compute the Action(s) needed to register the codex PreToolUse hook."""
     hooks_path = project_dir / ".codex" / "hooks.json"
-    hooks_path.parent.mkdir(parents=True, exist_ok=True)
-
     if hooks_path.exists():
         try:
             existing = json.loads(hooks_path.read_text(encoding="utf-8"))
@@ -898,12 +1067,19 @@ def _install_codex_hook(project_dir: Path) -> None:
             existing = {}
     else:
         existing = {}
-
     pre_tool = existing.setdefault("hooks", {}).setdefault("PreToolUse", [])
     existing["hooks"]["PreToolUse"] = [h for h in pre_tool if "graphify" not in str(h)]
     existing["hooks"]["PreToolUse"].extend(_CODEX_HOOK["hooks"]["PreToolUse"])
-    hooks_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
-    _audit_hook_install("codex", [hooks_path])
+    return [Action(hooks_path, json.dumps(existing, indent=2))]
+
+
+def _install_codex_hook(project_dir: Path) -> None:
+    """Add graphify PreToolUse hook to .codex/hooks.json."""
+    actions = plan_install_codex_hook(project_dir)
+    results = apply_plan(actions)
+    paths = modified_paths(results)
+    if paths:
+        _audit_hook_install("codex", paths)
     print(f"  .codex/hooks.json  ->  PreToolUse hook registered")
 
 
@@ -926,30 +1102,71 @@ def _uninstall_codex_hook(project_dir: Path) -> None:
     print(f"  .codex/hooks.json  ->  PreToolUse hook removed")
 
 
-def _agents_install(project_dir: Path, platform: str) -> None:
-    """Write the graphify section to the local AGENTS.md (Codex/OpenCode/OpenClaw)."""
-    paths: list[Path | str] = []
-    target = (project_dir or Path(".")) / "AGENTS.md"
+def plan_agents_install(project_dir: Path, platform: str) -> list[Action]:
+    """Compute Actions for `graphify <platform> install` for the AGENTS.md
+    family (codex, opencode, aider, claw, droid, trae, trae-cn, hermes).
 
+    Includes the codex/opencode platform-specific hook actions when
+    applicable so the entire install — rules + hooks — is described by a
+    single planner output.
+    """
+    actions: list[Action] = []
+    target = project_dir / "AGENTS.md"
     if target.exists():
         content = target.read_text(encoding="utf-8")
-        if _AGENTS_MD_MARKER in content:
-            print(f"graphify already configured in AGENTS.md")
-        else:
-            target.write_text(content.rstrip() + "\n\n" + _AGENTS_MD_SECTION, encoding="utf-8")
-            paths.append(target)
-            print(f"graphify section written to {target.resolve()}")
+        if _AGENTS_MD_MARKER not in content:
+            actions.append(Action(target, content.rstrip() + "\n\n" + _AGENTS_MD_SECTION))
     else:
-        target.write_text(_AGENTS_MD_SECTION, encoding="utf-8")
-        paths.append(target)
-        print(f"graphify section written to {target.resolve()}")
+        actions.append(Action(target, _AGENTS_MD_SECTION))
 
     if platform == "codex":
-        _install_codex_hook(project_dir or Path("."))
+        actions.extend(plan_install_codex_hook(project_dir))
     elif platform == "opencode":
-        _install_opencode_plugin(project_dir or Path("."))
+        actions.extend(plan_install_opencode_plugin(project_dir))
+    return actions
 
-    _audit_install(platform, paths)
+
+def _agents_install(project_dir: Path, platform: str, *, dry_run: bool = False) -> None:
+    """Write the graphify section to the local AGENTS.md (Codex/OpenCode/OpenClaw)."""
+    project_dir = project_dir or Path(".")
+    actions = plan_agents_install(project_dir, platform)
+    if dry_run:
+        print(render_plan(actions, header=f"=== plan: graphify {platform} install ==="))
+        return
+
+    results = apply_plan(actions)
+    paths = modified_paths(results)
+    target = project_dir / "AGENTS.md"
+    codex_hooks_path = project_dir / ".codex" / "hooks.json"
+    opencode_plugin = project_dir / _OPENCODE_PLUGIN_PATH
+    opencode_config = project_dir / _OPENCODE_CONFIG_PATH
+
+    if target in paths:
+        print(f"graphify section written to {target.resolve()}")
+    else:
+        print("graphify already configured in AGENTS.md")
+
+    hook_paths: list[Path] = []
+    if platform == "codex":
+        if codex_hooks_path in paths:
+            hook_paths.append(codex_hooks_path)
+        print(f"  .codex/hooks.json  ->  PreToolUse hook registered")
+    elif platform == "opencode":
+        if opencode_plugin in paths:
+            hook_paths.append(opencode_plugin)
+        print(f"  {_OPENCODE_PLUGIN_PATH}  ->  tool.execute.before hook written")
+        if opencode_config in paths:
+            hook_paths.append(opencode_config)
+            print(f"  {_OPENCODE_CONFIG_PATH}  ->  plugin registered")
+        else:
+            print(f"  {_OPENCODE_CONFIG_PATH}  ->  plugin already registered (no change)")
+
+    skill_paths = [p for p in paths if p not in hook_paths]
+    if skill_paths:
+        _audit_install(platform, skill_paths)
+    if hook_paths:
+        _audit_hook_install(platform, hook_paths)
+
     print()
     print(f"{platform.capitalize()} will now check the knowledge graph before answering")
     print("codebase questions and rebuild it after code changes.")
@@ -991,36 +1208,56 @@ def _agents_uninstall(project_dir: Path, platform: str = "") -> None:
         _uninstall_opencode_plugin(project_dir or Path("."))
 
 
-def claude_install(project_dir: Path | None = None) -> None:
-    """Write the graphify section to the local CLAUDE.md."""
-    target = (project_dir or Path(".")) / "CLAUDE.md"
-
+def plan_claude_install(project_dir: Path) -> list[Action]:
+    """Compute Actions for `graphify claude install`: project CLAUDE.md +
+    .claude/settings.json PreToolUse hook."""
+    actions: list[Action] = []
+    target = project_dir / "CLAUDE.md"
     if target.exists():
         content = target.read_text(encoding="utf-8")
-        if _CLAUDE_MD_MARKER in content:
-            print("graphify already configured in CLAUDE.md")
-            return
-        new_content = content.rstrip() + "\n\n" + _CLAUDE_MD_SECTION
+        if _CLAUDE_MD_MARKER not in content:
+            actions.append(Action(target, content.rstrip() + "\n\n" + _CLAUDE_MD_SECTION))
     else:
-        new_content = _CLAUDE_MD_SECTION
+        actions.append(Action(target, _CLAUDE_MD_SECTION))
+    actions.extend(plan_install_claude_hook(project_dir))
+    return actions
 
-    target.write_text(new_content, encoding="utf-8")
-    _audit_install("claude", [target])
-    print(f"graphify section written to {target.resolve()}")
 
-    # Also write Claude Code PreToolUse hook to .claude/settings.json
-    _install_claude_hook(project_dir or Path("."))
+def claude_install(project_dir: Path | None = None, *, dry_run: bool = False) -> None:
+    """Write the graphify section to the local CLAUDE.md."""
+    project_dir = project_dir or Path(".")
+    actions = plan_claude_install(project_dir)
+    if dry_run:
+        print(render_plan(actions, header="=== plan: graphify claude install ==="))
+        return
+
+    results = apply_plan(actions)
+    paths = modified_paths(results)
+    target = project_dir / "CLAUDE.md"
+    settings_path = project_dir / ".claude" / "settings.json"
+
+    if target in paths:
+        print(f"graphify section written to {target.resolve()}")
+    else:
+        print("graphify already configured in CLAUDE.md")
+    if settings_path in paths:
+        print(f"  .claude/settings.json  ->  PreToolUse hook registered")
+
+    skill_paths = [p for p in paths if p != settings_path]
+    hook_paths = [p for p in paths if p == settings_path]
+    if skill_paths:
+        _audit_install("claude", skill_paths)
+    if hook_paths:
+        _audit_hook_install("claude", hook_paths)
 
     print()
     print("Claude Code will now check the knowledge graph before answering")
     print("codebase questions and rebuild it after code changes.")
 
 
-def _install_claude_hook(project_dir: Path) -> None:
-    """Add graphify PreToolUse hook to .claude/settings.json."""
+def plan_install_claude_hook(project_dir: Path) -> list[Action]:
+    """Compute the Action(s) needed to register the claude PreToolUse hook."""
     settings_path = project_dir / ".claude" / "settings.json"
-    settings_path.parent.mkdir(parents=True, exist_ok=True)
-
     if settings_path.exists():
         try:
             settings = json.loads(settings_path.read_text(encoding="utf-8"))
@@ -1028,14 +1265,20 @@ def _install_claude_hook(project_dir: Path) -> None:
             settings = {}
     else:
         settings = {}
-
     hooks = settings.setdefault("hooks", {})
     pre_tool = hooks.setdefault("PreToolUse", [])
-
     hooks["PreToolUse"] = [h for h in pre_tool if not (h.get("matcher") in ("Glob|Grep", "Bash") and "graphify" in str(h))]
     hooks["PreToolUse"].append(_SETTINGS_HOOK)
-    settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
-    _audit_hook_install("claude", [settings_path])
+    return [Action(settings_path, json.dumps(settings, indent=2))]
+
+
+def _install_claude_hook(project_dir: Path) -> None:
+    """Add graphify PreToolUse hook to .claude/settings.json."""
+    actions = plan_install_claude_hook(project_dir)
+    results = apply_plan(actions)
+    paths = modified_paths(results)
+    if paths:
+        _audit_hook_install("claude", paths)
     print(f"  .claude/settings.json  ->  PreToolUse hook registered")
 
 
@@ -1452,6 +1695,7 @@ def main() -> None:
         print()
         print("Commands:")
         print("  install [--platform P]  copy skill to platform config dir (claude|windows|codex|opencode|aider|claw|droid|trae|trae-cn|gemini|cursor|antigravity|hermes|kiro)")
+        print("    --dry-run               (any install command) print planned changes with diffs and exit without modifying anything")
         print("  path \"A\" \"B\"            shortest path between two nodes in graph.json")
         print("    --graph <path>          path to graph.json (default graphify-out/graph.json)")
         print("  explain \"X\"             plain-language explanation of a node and its neighbors")
@@ -1519,6 +1763,11 @@ def main() -> None:
         return
 
     cmd = sys.argv[1]
+    # --dry-run is accepted by every install subcommand. We detect it once
+    # here so the per-command dispatch blocks can stay terse. The flag is
+    # silently ignored when present on a non-install command (e.g. `query`),
+    # which mirrors how other CLIs handle unknown flags rather than rejecting.
+    dry_run = "--dry-run" in sys.argv
     if cmd == "install":
         # Default to windows platform on Windows, claude elsewhere
         default_platform = "windows" if platform.system() == "Windows" else "claude"
@@ -1534,47 +1783,47 @@ def main() -> None:
                 i += 2
             else:
                 i += 1
-        install(platform=chosen_platform)
+        install(platform=chosen_platform, dry_run=dry_run)
     elif cmd == "claude":
         subcmd = sys.argv[2] if len(sys.argv) > 2 else ""
         if subcmd == "install":
-            claude_install()
+            claude_install(dry_run=dry_run)
         elif subcmd == "uninstall":
             claude_uninstall()
         else:
-            print("Usage: graphify claude [install|uninstall]", file=sys.stderr)
+            print("Usage: graphify claude [install|uninstall] [--dry-run]", file=sys.stderr)
             sys.exit(1)
     elif cmd == "gemini":
         subcmd = sys.argv[2] if len(sys.argv) > 2 else ""
         if subcmd == "install":
-            gemini_install()
+            gemini_install(dry_run=dry_run)
         elif subcmd == "uninstall":
             gemini_uninstall()
         else:
-            print("Usage: graphify gemini [install|uninstall]", file=sys.stderr)
+            print("Usage: graphify gemini [install|uninstall] [--dry-run]", file=sys.stderr)
             sys.exit(1)
     elif cmd == "cursor":
         subcmd = sys.argv[2] if len(sys.argv) > 2 else ""
         if subcmd == "install":
-            _cursor_install(Path("."))
+            _cursor_install(Path("."), dry_run=dry_run)
         elif subcmd == "uninstall":
             _cursor_uninstall(Path("."))
         else:
-            print("Usage: graphify cursor [install|uninstall]", file=sys.stderr)
+            print("Usage: graphify cursor [install|uninstall] [--dry-run]", file=sys.stderr)
             sys.exit(1)
     elif cmd == "vscode":
         subcmd = sys.argv[2] if len(sys.argv) > 2 else ""
         if subcmd == "install":
-            vscode_install()
+            vscode_install(dry_run=dry_run)
         elif subcmd == "uninstall":
             vscode_uninstall()
         else:
-            print("Usage: graphify vscode [install|uninstall]", file=sys.stderr)
+            print("Usage: graphify vscode [install|uninstall] [--dry-run]", file=sys.stderr)
             sys.exit(1)
     elif cmd == "copilot":
         subcmd = sys.argv[2] if len(sys.argv) > 2 else ""
         if subcmd == "install":
-            install(platform="copilot")
+            install(platform="copilot", dry_run=dry_run)
         elif subcmd == "uninstall":
             skill_dst = Path.home() / _PLATFORM_CONFIG["copilot"]["skill_dst"]
             removed = []
@@ -1591,36 +1840,36 @@ def main() -> None:
                     break
             print("; ".join(removed) if removed else "nothing to remove")
         else:
-            print("Usage: graphify copilot [install|uninstall]", file=sys.stderr)
+            print("Usage: graphify copilot [install|uninstall] [--dry-run]", file=sys.stderr)
             sys.exit(1)
     elif cmd == "kiro":
         subcmd = sys.argv[2] if len(sys.argv) > 2 else ""
         if subcmd == "install":
-            _kiro_install(Path("."))
+            _kiro_install(Path("."), dry_run=dry_run)
         elif subcmd == "uninstall":
             _kiro_uninstall(Path("."))
         else:
-            print("Usage: graphify kiro [install|uninstall]", file=sys.stderr)
+            print("Usage: graphify kiro [install|uninstall] [--dry-run]", file=sys.stderr)
             sys.exit(1)
     elif cmd in ("aider", "codex", "opencode", "claw", "droid", "trae", "trae-cn", "hermes"):
         subcmd = sys.argv[2] if len(sys.argv) > 2 else ""
         if subcmd == "install":
-            _agents_install(Path("."), cmd)
+            _agents_install(Path("."), cmd, dry_run=dry_run)
         elif subcmd == "uninstall":
             _agents_uninstall(Path("."), platform=cmd)
             if cmd == "codex":
                 _uninstall_codex_hook(Path("."))
         else:
-            print(f"Usage: graphify {cmd} [install|uninstall]", file=sys.stderr)
+            print(f"Usage: graphify {cmd} [install|uninstall] [--dry-run]", file=sys.stderr)
             sys.exit(1)
     elif cmd == "antigravity":
         subcmd = sys.argv[2] if len(sys.argv) > 2 else ""
         if subcmd == "install":
-            _antigravity_install(Path("."))
+            _antigravity_install(Path("."), dry_run=dry_run)
         elif subcmd == "uninstall":
             _antigravity_uninstall(Path("."))
         else:
-            print("Usage: graphify antigravity [install|uninstall]", file=sys.stderr)
+            print("Usage: graphify antigravity [install|uninstall] [--dry-run]", file=sys.stderr)
             sys.exit(1)
     elif cmd == "hook":
         from graphify.hooks import install as hook_install, uninstall as hook_uninstall, status as hook_status

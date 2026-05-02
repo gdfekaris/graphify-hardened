@@ -154,6 +154,129 @@ def _find_node(G: nx.Graph, label: str) -> list[str]:
             or term == nid.lower()]
 
 
+def _build_handlers(G: nx.Graph, communities: dict) -> dict:
+    """Construct the MCP tool-handler dict.
+
+    Pulled out of ``serve()`` so the handlers — which read node labels and
+    edge relations directly off the graph — are unit-testable without the
+    mcp stdio transport. Mirrors the rationale for ``_dispatch_tool`` (Phase
+    3.5). The returned dict is plug-compatible with ``_dispatch_tool``.
+    """
+    def _tool_query_graph(arguments: dict) -> str:
+        question = arguments["question"]
+        mode = arguments.get("mode", "bfs")
+        depth = min(int(arguments.get("depth", 3)), 6)
+        budget = int(arguments.get("token_budget", 2000))
+        terms = [t.lower() for t in question.split() if len(t) > 2]
+        scored = _score_nodes(G, terms)
+        start_nodes = [nid for _, nid in scored[:3]]
+        if not start_nodes:
+            return "No matching nodes found."
+        nodes, edges = _dfs(G, start_nodes, depth) if mode == "dfs" else _bfs(G, start_nodes, depth)
+        header = f"Traversal: {mode.upper()} depth={depth} | Start: {[G.nodes[n].get('label', n) for n in start_nodes]} | {len(nodes)} nodes found\n\n"
+        return header + _subgraph_to_text(G, nodes, edges, budget)
+
+    def _tool_get_node(arguments: dict) -> str:
+        label = arguments["label"].lower()
+        matches = [(nid, d) for nid, d in G.nodes(data=True)
+                   if label in (d.get("label") or "").lower() or label == nid.lower()]
+        if not matches:
+            return f"No node matching '{label}' found."
+        nid, d = matches[0]
+        return "\n".join([
+            f"Node: {d.get('label', nid)}",
+            f"  ID: {nid}",
+            f"  Source: {d.get('source_file', '')} {d.get('source_location', '')}",
+            f"  Type: {d.get('file_type', '')}",
+            f"  Community: {d.get('community', '')}",
+            f"  Degree: {G.degree(nid)}",
+        ])
+
+    def _tool_get_neighbors(arguments: dict) -> str:
+        label = arguments["label"].lower()
+        rel_filter = arguments.get("relation_filter", "").lower()
+        matches = _find_node(G, label)
+        if not matches:
+            return f"No node matching '{label}' found."
+        nid = matches[0]
+        lines = [f"Neighbors of {G.nodes[nid].get('label', nid)}:"]
+        for neighbor in G.neighbors(nid):
+            d = G.edges[nid, neighbor]
+            rel = d.get("relation", "")
+            if rel_filter and rel_filter not in rel.lower():
+                continue
+            lines.append(f"  --> {G.nodes[neighbor].get('label', neighbor)} [{rel}] [{d.get('confidence', '')}]")
+        return "\n".join(lines)
+
+    def _tool_get_community(arguments: dict) -> str:
+        cid = int(arguments["community_id"])
+        nodes = communities.get(cid, [])
+        if not nodes:
+            return f"Community {cid} not found."
+        lines = [f"Community {cid} ({len(nodes)} nodes):"]
+        for n in nodes:
+            d = G.nodes[n]
+            lines.append(f"  {d.get('label', n)} [{d.get('source_file', '')}]")
+        return "\n".join(lines)
+
+    def _tool_god_nodes(arguments: dict) -> str:
+        from .analyze import god_nodes as _god_nodes
+        nodes = _god_nodes(G, top_n=int(arguments.get("top_n", 10)))
+        lines = ["God nodes (most connected):"]
+        lines += [f"  {i}. {n['label']} - {n['degree']} edges" for i, n in enumerate(nodes, 1)]
+        return "\n".join(lines)
+
+    def _tool_graph_stats(_: dict) -> str:
+        confs = [d.get("confidence", "EXTRACTED") for _, _, d in G.edges(data=True)]
+        total = len(confs) or 1
+        return (
+            f"Nodes: {G.number_of_nodes()}\n"
+            f"Edges: {G.number_of_edges()}\n"
+            f"Communities: {len(communities)}\n"
+            f"EXTRACTED: {round(confs.count('EXTRACTED')/total*100)}%\n"
+            f"INFERRED: {round(confs.count('INFERRED')/total*100)}%\n"
+            f"AMBIGUOUS: {round(confs.count('AMBIGUOUS')/total*100)}%\n"
+        )
+
+    def _tool_shortest_path(arguments: dict) -> str:
+        src_scored = _score_nodes(G, [t.lower() for t in arguments["source"].split()])
+        tgt_scored = _score_nodes(G, [t.lower() for t in arguments["target"].split()])
+        if not src_scored:
+            return f"No node matching source '{arguments['source']}' found."
+        if not tgt_scored:
+            return f"No node matching target '{arguments['target']}' found."
+        src_nid, tgt_nid = src_scored[0][1], tgt_scored[0][1]
+        max_hops = int(arguments.get("max_hops", 8))
+        try:
+            path_nodes = nx.shortest_path(G, src_nid, tgt_nid)
+        except (nx.NetworkXNoPath, nx.NodeNotFound):
+            return f"No path found between '{G.nodes[src_nid].get('label', src_nid)}' and '{G.nodes[tgt_nid].get('label', tgt_nid)}'."
+        hops = len(path_nodes) - 1
+        if hops > max_hops:
+            return f"Path exceeds max_hops={max_hops} ({hops} hops found)."
+        segments = []
+        for i in range(len(path_nodes) - 1):
+            u, v = path_nodes[i], path_nodes[i + 1]
+            edata = G.edges[u, v]
+            rel = edata.get("relation", "")
+            conf = edata.get("confidence", "")
+            conf_str = f" [{conf}]" if conf else ""
+            if i == 0:
+                segments.append(G.nodes[u].get("label", u))
+            segments.append(f"--{rel}{conf_str}--> {G.nodes[v].get('label', v)}")
+        return f"Shortest path ({hops} hops):\n  " + " ".join(segments)
+
+    return {
+        "query_graph": _tool_query_graph,
+        "get_node": _tool_get_node,
+        "get_neighbors": _tool_get_neighbors,
+        "get_community": _tool_get_community,
+        "god_nodes": _tool_god_nodes,
+        "graph_stats": _tool_graph_stats,
+        "shortest_path": _tool_shortest_path,
+    }
+
+
 def _filter_blank_stdin() -> None:
     """Filter blank lines from stdin before MCP reads it.
 
@@ -271,119 +394,7 @@ def serve(graph_path: str = "graphify-out/graph.json") -> None:
             ),
         ]
 
-    def _tool_query_graph(arguments: dict) -> str:
-        question = arguments["question"]
-        mode = arguments.get("mode", "bfs")
-        depth = min(int(arguments.get("depth", 3)), 6)
-        budget = int(arguments.get("token_budget", 2000))
-        terms = [t.lower() for t in question.split() if len(t) > 2]
-        scored = _score_nodes(G, terms)
-        start_nodes = [nid for _, nid in scored[:3]]
-        if not start_nodes:
-            return "No matching nodes found."
-        nodes, edges = _dfs(G, start_nodes, depth) if mode == "dfs" else _bfs(G, start_nodes, depth)
-        header = f"Traversal: {mode.upper()} depth={depth} | Start: {[G.nodes[n].get('label', n) for n in start_nodes]} | {len(nodes)} nodes found\n\n"
-        return header + _subgraph_to_text(G, nodes, edges, budget)
-
-    def _tool_get_node(arguments: dict) -> str:
-        label = arguments["label"].lower()
-        matches = [(nid, d) for nid, d in G.nodes(data=True)
-                   if label in (d.get("label") or "").lower() or label == nid.lower()]
-        if not matches:
-            return f"No node matching '{label}' found."
-        nid, d = matches[0]
-        return "\n".join([
-            f"Node: {d.get('label', nid)}",
-            f"  ID: {nid}",
-            f"  Source: {d.get('source_file', '')} {d.get('source_location', '')}",
-            f"  Type: {d.get('file_type', '')}",
-            f"  Community: {d.get('community', '')}",
-            f"  Degree: {G.degree(nid)}",
-        ])
-
-    def _tool_get_neighbors(arguments: dict) -> str:
-        label = arguments["label"].lower()
-        rel_filter = arguments.get("relation_filter", "").lower()
-        matches = _find_node(G, label)
-        if not matches:
-            return f"No node matching '{label}' found."
-        nid = matches[0]
-        lines = [f"Neighbors of {G.nodes[nid].get('label', nid)}:"]
-        for neighbor in G.neighbors(nid):
-            d = G.edges[nid, neighbor]
-            rel = d.get("relation", "")
-            if rel_filter and rel_filter not in rel.lower():
-                continue
-            lines.append(f"  --> {G.nodes[neighbor].get('label', neighbor)} [{rel}] [{d.get('confidence', '')}]")
-        return "\n".join(lines)
-
-    def _tool_get_community(arguments: dict) -> str:
-        cid = int(arguments["community_id"])
-        nodes = communities.get(cid, [])
-        if not nodes:
-            return f"Community {cid} not found."
-        lines = [f"Community {cid} ({len(nodes)} nodes):"]
-        for n in nodes:
-            d = G.nodes[n]
-            lines.append(f"  {d.get('label', n)} [{d.get('source_file', '')}]")
-        return "\n".join(lines)
-
-    def _tool_god_nodes(arguments: dict) -> str:
-        from .analyze import god_nodes as _god_nodes
-        nodes = _god_nodes(G, top_n=int(arguments.get("top_n", 10)))
-        lines = ["God nodes (most connected):"]
-        lines += [f"  {i}. {n['label']} - {n['degree']} edges" for i, n in enumerate(nodes, 1)]
-        return "\n".join(lines)
-
-    def _tool_graph_stats(_: dict) -> str:
-        confs = [d.get("confidence", "EXTRACTED") for _, _, d in G.edges(data=True)]
-        total = len(confs) or 1
-        return (
-            f"Nodes: {G.number_of_nodes()}\n"
-            f"Edges: {G.number_of_edges()}\n"
-            f"Communities: {len(communities)}\n"
-            f"EXTRACTED: {round(confs.count('EXTRACTED')/total*100)}%\n"
-            f"INFERRED: {round(confs.count('INFERRED')/total*100)}%\n"
-            f"AMBIGUOUS: {round(confs.count('AMBIGUOUS')/total*100)}%\n"
-        )
-
-    def _tool_shortest_path(arguments: dict) -> str:
-        src_scored = _score_nodes(G, [t.lower() for t in arguments["source"].split()])
-        tgt_scored = _score_nodes(G, [t.lower() for t in arguments["target"].split()])
-        if not src_scored:
-            return f"No node matching source '{arguments['source']}' found."
-        if not tgt_scored:
-            return f"No node matching target '{arguments['target']}' found."
-        src_nid, tgt_nid = src_scored[0][1], tgt_scored[0][1]
-        max_hops = int(arguments.get("max_hops", 8))
-        try:
-            path_nodes = nx.shortest_path(G, src_nid, tgt_nid)
-        except (nx.NetworkXNoPath, nx.NodeNotFound):
-            return f"No path found between '{G.nodes[src_nid].get('label', src_nid)}' and '{G.nodes[tgt_nid].get('label', tgt_nid)}'."
-        hops = len(path_nodes) - 1
-        if hops > max_hops:
-            return f"Path exceeds max_hops={max_hops} ({hops} hops found)."
-        segments = []
-        for i in range(len(path_nodes) - 1):
-            u, v = path_nodes[i], path_nodes[i + 1]
-            edata = G.edges[u, v]
-            rel = edata.get("relation", "")
-            conf = edata.get("confidence", "")
-            conf_str = f" [{conf}]" if conf else ""
-            if i == 0:
-                segments.append(G.nodes[u].get("label", u))
-            segments.append(f"--{rel}{conf_str}--> {G.nodes[v].get('label', v)}")
-        return f"Shortest path ({hops} hops):\n  " + " ".join(segments)
-
-    _handlers = {
-        "query_graph": _tool_query_graph,
-        "get_node": _tool_get_node,
-        "get_neighbors": _tool_get_neighbors,
-        "get_community": _tool_get_community,
-        "god_nodes": _tool_god_nodes,
-        "graph_stats": _tool_graph_stats,
-        "shortest_path": _tool_shortest_path,
-    }
+    _handlers = _build_handlers(G, communities)
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:

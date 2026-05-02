@@ -75,6 +75,31 @@ def _parse_llm_json(raw: str) -> dict:
         return {"nodes": [], "edges": [], "hyperedges": []}
 
 
+def _redact_key(exc: BaseException, key: str) -> BaseException:
+    """Return an exception with *key* scrubbed from its message.
+
+    Returns *exc* unchanged when there is nothing to redact (key is empty,
+    suspiciously short, or absent from the message). Otherwise constructs a
+    same-type exception carrying the scrubbed message; if the original
+    class refuses single-arg construction, falls back to RuntimeError so we
+    never lose the user-visible error in the name of redaction.
+
+    The 8-char floor avoids pathological replacements when a caller passes
+    a placeholder like "test" — a legitimate Anthropic / OpenAI key is much
+    longer, so the floor cannot mask a real leak.
+    """
+    if not key or len(key) < 8:
+        return exc
+    msg = str(exc)
+    if key not in msg:
+        return exc
+    redacted = msg.replace(key, "[REDACTED]")
+    try:
+        return type(exc)(redacted)
+    except Exception:
+        return RuntimeError(redacted)
+
+
 def _call_openai_compat(
     base_url: str,
     api_key: str,
@@ -91,18 +116,32 @@ def _call_openai_compat(
             "Run: pip install openai"
         ) from exc
 
-    client = OpenAI(api_key=api_key, base_url=base_url)
-    kwargs: dict = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": _EXTRACTION_SYSTEM},
-            {"role": "user", "content": user_message},
-        ],
-        "max_completion_tokens": 8192,
-    }
-    if temperature is not None:
-        kwargs["temperature"] = temperature
-    resp = client.chat.completions.create(**kwargs)
+    # Capture-then-raise pattern: we must raise the scrubbed exception
+    # *outside* the except block. `raise X from None` inside an except still
+    # auto-sets X.__context__ to the in-flight exception at the bytecode
+    # level — pre-clearing the attribute is overwritten — and the original
+    # message would re-leak through anyone who walks the chain.
+    scrubbed: BaseException | None = None
+    try:
+        client = OpenAI(api_key=api_key, base_url=base_url)
+        kwargs: dict = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": _EXTRACTION_SYSTEM},
+                {"role": "user", "content": user_message},
+            ],
+            "max_completion_tokens": 8192,
+        }
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+        resp = client.chat.completions.create(**kwargs)
+    except Exception as exc:
+        if api_key and api_key in str(exc):
+            scrubbed = _redact_key(exc, api_key)
+        else:
+            raise
+    if scrubbed is not None:
+        raise scrubbed
     result = _parse_llm_json(resp.choices[0].message.content or "{}")
     result["input_tokens"] = resp.usage.prompt_tokens if resp.usage else 0
     result["output_tokens"] = resp.usage.completion_tokens if resp.usage else 0
@@ -120,13 +159,22 @@ def _call_claude(api_key: str, model: str, user_message: str) -> dict:
             "Run: pip install anthropic"
         ) from exc
 
-    client = anthropic.Anthropic(api_key=api_key)
-    resp = client.messages.create(
-        model=model,
-        max_tokens=8192,
-        system=_EXTRACTION_SYSTEM,
-        messages=[{"role": "user", "content": user_message}],
-    )
+    scrubbed: BaseException | None = None
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        resp = client.messages.create(
+            model=model,
+            max_tokens=8192,
+            system=_EXTRACTION_SYSTEM,
+            messages=[{"role": "user", "content": user_message}],
+        )
+    except Exception as exc:
+        if api_key and api_key in str(exc):
+            scrubbed = _redact_key(exc, api_key)
+        else:
+            raise
+    if scrubbed is not None:
+        raise scrubbed
     result = _parse_llm_json(resp.content[0].text if resp.content else "{}")
     result["input_tokens"] = resp.usage.input_tokens if resp.usage else 0
     result["output_tokens"] = resp.usage.output_tokens if resp.usage else 0

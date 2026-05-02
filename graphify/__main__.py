@@ -1092,12 +1092,25 @@ def _clone_repo(url: str, branch: str | None = None, out_dir: Path | None = None
     else:
         dest = Path.home() / ".graphify" / "repos" / owner / repo
 
+    # 5 minutes covers a depth-1 clone of any reasonable repo on a slow link;
+    # past that, we'd rather fail loudly than hang a CLI invocation forever.
+    _GIT_NETWORK_TIMEOUT = 300
+
     if dest.exists():
         print(f"Repo already cloned at {dest} — pulling latest...", flush=True)
         cmd = ["git", "-C", str(dest), "pull"]
         if branch:
             cmd += ["--", "origin", branch]
-        result = _sp.run(cmd, capture_output=True, text=True)
+        try:
+            result = _sp.run(cmd, capture_output=True, text=True, timeout=_GIT_NETWORK_TIMEOUT)
+        except _sp.TimeoutExpired:
+            print(
+                f"warning: git pull timed out after {_GIT_NETWORK_TIMEOUT}s; "
+                f"using stale clone at {dest}",
+                file=sys.stderr,
+            )
+            print(f"Ready at: {dest}", flush=True)
+            return dest
         if result.returncode != 0:
             print(f"warning: git pull failed:\n{result.stderr}", file=sys.stderr)
     else:
@@ -1107,7 +1120,14 @@ def _clone_repo(url: str, branch: str | None = None, out_dir: Path | None = None
         if branch:
             cmd += ["--branch", branch]
         cmd += ["--", git_url, str(dest)]
-        result = _sp.run(cmd, capture_output=True, text=True)
+        try:
+            result = _sp.run(cmd, capture_output=True, text=True, timeout=_GIT_NETWORK_TIMEOUT)
+        except _sp.TimeoutExpired:
+            print(
+                f"error: git clone timed out after {_GIT_NETWORK_TIMEOUT}s",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         if result.returncode != 0:
             print(f"error: git clone failed:\n{result.stderr}", file=sys.stderr)
             sys.exit(1)

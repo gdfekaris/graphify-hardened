@@ -226,3 +226,26 @@ def test_clone_repo_allowlist_match_proceeds(tmp_path, monkeypatch):
     with patch("subprocess.run", return_value=fake) as mock_run:
         _clone_repo("https://github.com/karpathy/nanoGPT", out_dir=tmp_path / "dest")
     mock_run.assert_called_once()
+
+
+def test_clone_repo_passes_timeout_to_subprocess(tmp_path, monkeypatch):
+    monkeypatch.delenv("GRAPHIFY_CLONE_ALLOWED_HOSTS", raising=False)
+    monkeypatch.delenv("GRAPHIFY_CLONE_ALLOWED_OWNERS", raising=False)
+    fake = MagicMock()
+    fake.returncode = 0
+    fake.stderr = ""
+    with patch("subprocess.run", return_value=fake) as mock_run:
+        _clone_repo("https://github.com/karpathy/nanoGPT", out_dir=tmp_path / "dest")
+    # A timeout MUST be set; otherwise a stalled network connection would hang
+    # the CLI forever.
+    assert "timeout" in mock_run.call_args.kwargs
+    assert mock_run.call_args.kwargs["timeout"] >= 60
+
+
+def test_clone_repo_handles_clone_timeout(tmp_path, monkeypatch):
+    import subprocess as _sp
+    monkeypatch.delenv("GRAPHIFY_CLONE_ALLOWED_HOSTS", raising=False)
+    monkeypatch.delenv("GRAPHIFY_CLONE_ALLOWED_OWNERS", raising=False)
+    with patch("subprocess.run", side_effect=_sp.TimeoutExpired(cmd="git", timeout=300)):
+        with pytest.raises(SystemExit):
+            _clone_repo("https://github.com/karpathy/nanoGPT", out_dir=tmp_path / "dest")

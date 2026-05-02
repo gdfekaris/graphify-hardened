@@ -140,7 +140,7 @@ def _hooks_dir(root: Path) -> Path:
     try:
         result = subprocess.run(
             ["git", "-C", str(root), "config", "core.hooksPath"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, timeout=5,
         )
         if result.returncode == 0:
             custom = result.stdout.strip()
@@ -150,7 +150,7 @@ def _hooks_dir(root: Path) -> Path:
                     p = root / p
                 p.mkdir(parents=True, exist_ok=True)
                 return p
-    except (OSError, FileNotFoundError):
+    except (OSError, FileNotFoundError, subprocess.TimeoutExpired):
         pass
     d = root / ".git" / "hooks"
     d.mkdir(exist_ok=True)

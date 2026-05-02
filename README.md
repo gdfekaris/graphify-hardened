@@ -46,6 +46,31 @@ Every relationship is tagged `EXTRACTED` (found directly in source), `INFERRED` 
 
 ## Install
 
+> **Installing the hardened fork.** This fork is not published to PyPI —
+> intentionally, to keep the trust surface small. To install it, clone the
+> repo at the signed release tag:
+>
+> ```bash
+> git clone --branch v0.1.0-hardened --depth 1 \
+>     https://github.com/gdfekaris/graphify-hardened.git
+> cd graphify-hardened
+> uv tool install .            # or: pipx install . / pip install .
+> ```
+>
+> **Verify the tag signature** (recommended for any security-focused
+> install):
+>
+> ```bash
+> git tag -v v0.1.0-hardened
+> ```
+>
+> Should print `Good signature from "georgeF <gdfekaris@gmail.com>"` with
+> fingerprint `43C238872226A83A4FDAB86E0C757C7BAF91D21B`. If that line is
+> missing or the fingerprint differs, **do not install** — open an issue.
+>
+> The instructions immediately below are upstream's; running `pip install
+> graphifyy` installs the upstream package, not this hardened fork.
+
 **Requires:** Python 3.10+ and one of: [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex), [OpenCode](https://opencode.ai), [Cursor](https://cursor.com), [Gemini CLI](https://github.com/google-gemini/gemini-cli), [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli), [VS Code Copilot Chat](https://code.visualstudio.com/docs/copilot/overview), [Aider](https://aider.chat), [OpenClaw](https://openclaw.ai), [Factory Droid](https://factory.ai), [Trae](https://trae.ai), [Kiro](https://kiro.dev), Hermes, or [Google Antigravity](https://antigravity.google)
 
 ```bash

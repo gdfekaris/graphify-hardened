@@ -231,12 +231,18 @@ def _resolve_skill_dst(platform: str, cfg: dict) -> Path:
 
 
 def plan_install(platform: str) -> list[Action]:
-    """Compute the Actions for ``graphify install --platform <P>``.
+    """Compute the home-side Actions for ``graphify install --platform <P>``.
 
-    Covers: skill file copy, .graphify_version sidecar, ``~/.claude/CLAUDE.md``
-    registration line for claude/windows, opencode plugin + opencode.json
-    registration. Excludes the cross-platform version-stamp refresh — that
-    is a side-effect handled by ``_refresh_all_version_stamps`` after apply.
+    Covers: skill file copy, ``.graphify_version`` sidecar, and the
+    ``~/.claude/CLAUDE.md`` skill-registration line for claude/windows.
+
+    Project-local files (CLAUDE.md / AGENTS.md / GEMINI.md / hook configs)
+    are NOT included here — the F3 surface merge in ``install()`` chains
+    to the matching subcommand installer for that, so those files share
+    one planner+applier with the subcommand path.
+
+    The cross-platform version-stamp refresh is a side-effect handled by
+    ``_refresh_all_version_stamps`` after apply.
     """
     cfg = _PLATFORM_CONFIG[platform]
     skill_src = Path(__file__).parent / cfg["skill_file"]
@@ -260,18 +266,30 @@ def plan_install(platform: str) -> list[Action]:
         else:
             actions.append(Action(claude_md, _SKILL_REGISTRATION.lstrip()))
 
-    if platform == "opencode":
-        actions.extend(plan_install_opencode_plugin(Path(".")))
-
     return actions
 
 
+# Platforms whose `graphify <platform> install` subcommand owns the entire
+# install surface (skill + rules + hooks). Top-level `install --platform <P>`
+# routes through the subcommand installer for these so a single source of
+# truth lives in one function.
+#
+# - kiro: F2 — Kiro reads project-local `.kiro/`, so the previous home-side
+#   skill write was orphan. Routing through `_kiro_install` removes it.
+# - antigravity: same logic — `_antigravity_install` already plans the
+#   skill copy with the right frontmatter, plus rules + workflow.
+# - gemini, cursor: existed pre-merge, kept here for symmetry.
+_SUBCOMMAND_OWNED = {
+    "gemini": lambda dry_run: gemini_install(dry_run=dry_run),
+    "cursor": lambda dry_run: _cursor_install(Path("."), dry_run=dry_run),
+    "kiro": lambda dry_run: _kiro_install(Path("."), dry_run=dry_run),
+    "antigravity": lambda dry_run: _antigravity_install(Path("."), dry_run=dry_run),
+}
+
+
 def install(platform: str = "claude", *, dry_run: bool = False) -> None:
-    if platform == "gemini":
-        gemini_install(dry_run=dry_run)
-        return
-    if platform == "cursor":
-        _cursor_install(Path("."), dry_run=dry_run)
+    if platform in _SUBCOMMAND_OWNED:
+        _SUBCOMMAND_OWNED[platform](dry_run)
         return
     if platform not in _PLATFORM_CONFIG:
         print(
@@ -288,65 +306,49 @@ def install(platform: str = "claude", *, dry_run: bool = False) -> None:
 
     if dry_run:
         print(render_plan(actions, header=f"=== plan: graphify install --platform {platform} ==="))
-        return
+    else:
+        cfg = _PLATFORM_CONFIG[platform]
+        results = apply_plan(actions)
+        paths = modified_paths(results)
 
-    cfg = _PLATFORM_CONFIG[platform]
-    results = apply_plan(actions)
-    paths = modified_paths(results)
+        skill_dst = _resolve_skill_dst(platform, cfg)
+        print(f"  skill installed  ->  {skill_dst}")
 
-    skill_dst = _resolve_skill_dst(platform, cfg)
-    print(f"  skill installed  ->  {skill_dst}")
-
-    if cfg["claude_md"]:
-        claude_md = Path.home() / ".claude" / "CLAUDE.md"
-        if claude_md in paths:
-            # Two cases: created (didn't exist) or modified (appended). The
-            # planner only emits an Action when the marker is missing, so
-            # the path being in `paths` always means a change happened.
-            if any(r.action.path == claude_md and r.status == "created" for r in results):
-                print(f"  CLAUDE.md        ->  created at {claude_md}")
+        if cfg["claude_md"]:
+            claude_md = Path.home() / ".claude" / "CLAUDE.md"
+            if claude_md in paths:
+                if any(r.action.path == claude_md and r.status == "created" for r in results):
+                    print(f"  CLAUDE.md        ->  created at {claude_md}")
+                else:
+                    print(f"  CLAUDE.md        ->  skill registered in {claude_md}")
             else:
-                print(f"  CLAUDE.md        ->  skill registered in {claude_md}")
-        else:
-            print(f"  CLAUDE.md        ->  already registered (no change)")
+                print(f"  CLAUDE.md        ->  already registered (no change)")
 
-    if platform == "opencode":
-        # Mirror the per-file status messages emitted by the original
-        # _install_opencode_plugin so the CLI output stays the same.
-        plugin_file = Path(".") / _OPENCODE_PLUGIN_PATH
-        config_file = Path(".") / _OPENCODE_CONFIG_PATH
-        if plugin_file in paths:
-            print(f"  {_OPENCODE_PLUGIN_PATH}  ->  tool.execute.before hook written")
-        if config_file in paths:
-            print(f"  {_OPENCODE_CONFIG_PATH}  ->  plugin registered")
-        else:
-            print(f"  {_OPENCODE_CONFIG_PATH}  ->  plugin already registered (no change)")
+        if paths:
+            _audit_install(platform, paths)
 
-    # Refresh version stamps in all other previously-installed skill dirs so
-    # stale-version warnings don't fire for platforms not explicitly re-installed.
-    _refresh_all_version_stamps()
+        # Refresh version stamps in all other previously-installed skill dirs
+        # so stale-version warnings don't fire for platforms not explicitly
+        # re-installed.
+        _refresh_all_version_stamps()
 
-    if paths:
-        # Split paths so opencode plugin writes are audited as install_hook
-        # rather than install_skill (matches pre-refactor behavior — the old
-        # `_install_opencode_plugin` emitted its own install_hook event).
-        opencode_paths = [
-            p for p in paths
-            if platform == "opencode" and (
-                p == Path(".") / _OPENCODE_PLUGIN_PATH or p == Path(".") / _OPENCODE_CONFIG_PATH
-            )
-        ]
-        skill_paths = [p for p in paths if p not in opencode_paths]
-        if skill_paths:
-            _audit_install(platform, skill_paths)
-        if opencode_paths:
-            _audit_hook_install("opencode", opencode_paths)
+    # F3 surface merge: chain to the project-local subcommand for platforms
+    # that have one, so untrusted-data framing always reaches the assistant
+    # — it lives in the rules file, not the skill file.
+    if platform in ("claude", "windows"):
+        claude_install(Path("."), dry_run=dry_run)
+    elif platform in ("codex", "opencode", "aider", "claw", "droid", "trae", "trae-cn", "hermes"):
+        _agents_install(Path("."), platform, dry_run=dry_run)
+    # copilot is intentionally skipped: the GitHub Copilot CLI does not
+    # read a project-local rules file equivalent. The skill copy is the
+    # full install surface.
 
-    print()
-    print("Done. Open your AI coding assistant and type:")
-    print()
-    print("  /graphify .")
-    print()
+    if not dry_run:
+        print()
+        print("Done. Open your AI coding assistant and type:")
+        print()
+        print("  /graphify .")
+        print()
 
 
 _CLAUDE_MD_SECTION = """\

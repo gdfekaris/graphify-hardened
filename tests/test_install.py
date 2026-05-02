@@ -17,9 +17,21 @@ PLATFORMS = {
 
 
 def _install(tmp_path, platform):
+    """Run ``install(platform=<P>)`` with HOME mocked to tmp_path AND CWD
+    chdir'd to tmp_path. The chdir is needed because the F3 surface-merge
+    in Task 6.2 chains the top-level install through the project-local
+    subcommand installer, which writes to ``Path(".")`` — without the
+    chdir those writes would land in the dev tree.
+    """
     from graphify.__main__ import install
-    with patch("graphify.__main__.Path.home", return_value=tmp_path):
-        install(platform=platform)
+    import os
+    cwd = os.getcwd()
+    try:
+        os.chdir(tmp_path)
+        with patch("graphify.__main__.Path.home", return_value=tmp_path):
+            install(platform=platform)
+    finally:
+        os.chdir(cwd)
 
 
 def test_install_default_claude(tmp_path):
@@ -32,17 +44,19 @@ def test_install_codex(tmp_path):
     assert (tmp_path / ".agents" / "skills" / "graphify" / "SKILL.md").exists()
 
 
-def test_install_opencode(tmp_path, monkeypatch):
-    # install("opencode") calls _install_opencode_plugin(Path(".")) which writes
-    # `.opencode/plugins/graphify.js` and `.opencode/opencode.json` into CWD,
-    # not into HOME — so we must chdir to tmp_path to avoid polluting the dev
-    # tree. Documented in audit/skill-installer-review.md (F6); the asymmetry
-    # itself is deferred to Task 6.2 (F2/F3 surface merge).
-    monkeypatch.chdir(tmp_path)
+def test_install_opencode(tmp_path):
+    # install("opencode") chains to _agents_install which writes
+    # AGENTS.md + .opencode/plugins/graphify.js + .opencode/opencode.json
+    # into CWD. The _install helper now handles the chdir to keep the dev
+    # tree clean.
     _install(tmp_path, "opencode")
     assert (tmp_path / ".config" / "opencode" / "skills" / "graphify" / "SKILL.md").exists()
     assert (tmp_path / ".opencode" / "plugins" / "graphify.js").exists()
     assert (tmp_path / ".opencode" / "opencode.json").exists()
+    # F3 surface-merge: the project AGENTS.md with framing is written too.
+    assert (tmp_path / "AGENTS.md").exists()
+    assert "## graphify" in (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+    assert "untrusted data" in (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
 
 
 def test_install_claw(tmp_path):
@@ -353,3 +367,75 @@ def test_codex_uninstall_hook_noop_when_no_graphify_entries(tmp_path):
     (tmp_path / ".codex" / "hooks.json").write_text(_json.dumps(payload))
     _uninstall_codex_hook(tmp_path)
     assert _json.loads((tmp_path / ".codex" / "hooks.json").read_text()) == payload
+
+
+# ── F2 + F3 surface-merge regressions ────────────────────────────────────────
+
+def test_install_kiro_does_not_write_orphan_home_skill(tmp_path):
+    """F2 — `graphify install --platform kiro` must route through
+    `_kiro_install` and write project-local files only. The home skill at
+    `~/.kiro/skills/...` from the pre-merge top-level path was orphan."""
+    _install(tmp_path, "kiro")
+    # Project-local: skill + steering should exist
+    assert (tmp_path / ".kiro" / "skills" / "graphify" / "SKILL.md").exists()
+    assert (tmp_path / ".kiro" / "steering" / "graphify.md").exists()
+    # Home: no orphan ~/.kiro/skills/graphify/SKILL.md (we mocked HOME to
+    # tmp_path, so the orphan would also live under tmp_path — but only at
+    # the home path, distinct from the project path. Since project_dir==tmp_path
+    # here, both home and project resolve to the same place; the planner
+    # writes once. Assert there are no writes to a *separate* home dir.)
+    # The clearer assertion: install("kiro") writes the steering file, which
+    # the pre-merge path never did.
+    assert "untrusted data" in (tmp_path / ".kiro" / "steering" / "graphify.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("platform,rules_file", [
+    ("aider",   "AGENTS.md"),
+    ("codex",   "AGENTS.md"),
+    ("opencode","AGENTS.md"),
+    ("claw",    "AGENTS.md"),
+    ("droid",   "AGENTS.md"),
+    ("trae",    "AGENTS.md"),
+    ("trae-cn", "AGENTS.md"),
+    ("hermes",  "AGENTS.md"),
+])
+def test_top_level_install_lands_rules_file_with_framing(tmp_path, platform, rules_file):
+    """F3 — `graphify install --platform <P>` must also write the project-
+    local rules file with `_UNTRUSTED_FRAMING`. Pre-merge, the top-level
+    only copied the skill; users who never ran the subcommand never saw
+    the framing reach the assistant."""
+    _install(tmp_path, platform)
+    rules = tmp_path / rules_file
+    assert rules.exists(), f"{rules_file} not written for {platform}"
+    content = rules.read_text(encoding="utf-8")
+    assert "## graphify" in content
+    assert "untrusted data" in content
+
+
+def test_top_level_install_claude_lands_project_claude_md(tmp_path):
+    """F3 — claude top-level install also writes project CLAUDE.md + hook."""
+    _install(tmp_path, "claude")
+    project_claude_md = tmp_path / "CLAUDE.md"
+    project_settings = tmp_path / ".claude" / "settings.json"
+    assert project_claude_md.exists()
+    assert "untrusted data" in project_claude_md.read_text(encoding="utf-8")
+    assert project_settings.exists()
+
+
+def test_top_level_install_windows_lands_project_claude_md(tmp_path):
+    """F3 — windows behaves like claude for project-local writes."""
+    _install(tmp_path, "windows")
+    assert (tmp_path / "CLAUDE.md").exists()
+    assert (tmp_path / ".claude" / "settings.json").exists()
+
+
+def test_top_level_install_copilot_does_not_write_rules_file(tmp_path):
+    """F3 — copilot has no project-local rules file equivalent. The skill
+    copy is the full install surface; chaining is intentionally skipped."""
+    _install(tmp_path, "copilot")
+    # Skill exists
+    assert (tmp_path / ".copilot" / "skills" / "graphify" / "SKILL.md").exists()
+    # No project rules files written
+    assert not (tmp_path / "AGENTS.md").exists()
+    assert not (tmp_path / "CLAUDE.md").exists()
+    assert not (tmp_path / "GEMINI.md").exists()

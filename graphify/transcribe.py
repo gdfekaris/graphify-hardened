@@ -24,8 +24,10 @@ def _get_whisper():
         return WhisperModel
     except ImportError as exc:
         raise ImportError(
-            "Video transcription requires faster-whisper. "
-            "Run: pip install 'graphifyy[video]'"
+            "Video transcription requires faster-whisper, but the [video] extra "
+            "was intentionally dropped in this fork (see FORK.md and "
+            "audit/phase4-task4.6-status-crossref.md). Transcribe locally with "
+            "the tooling of your choice and point graphify at the resulting text."
         ) from exc
 
 
@@ -35,8 +37,10 @@ def _get_yt_dlp():
         return yt_dlp
     except ImportError as exc:
         raise ImportError(
-            "YouTube/URL download requires yt-dlp. "
-            "Run: pip install 'graphifyy[video]'"
+            "YouTube/URL download requires yt-dlp, but the [video] extra was "
+            "intentionally dropped in this fork (see FORK.md and "
+            "audit/phase4-task4.6-status-crossref.md). Download out-of-band, "
+            "then point graphify at the resulting audio or transcript file."
         ) from exc
 
 

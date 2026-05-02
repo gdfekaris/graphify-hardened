@@ -319,3 +319,29 @@ def test_gemini_uninstall_removes_hook(tmp_path):
 def test_gemini_uninstall_noop_if_not_installed(tmp_path):
     from graphify.__main__ import gemini_uninstall
     gemini_uninstall(tmp_path)  # should not raise
+
+
+# ── Codex hook uninstall edge cases ──────────────────────────────────────────
+
+def test_codex_uninstall_hook_noop_when_no_hooks_key(tmp_path):
+    """Uninstalling against a hooks.json that lacks a top-level 'hooks' key
+    must not raise — regression for F1 in audit/skill-installer-review.md."""
+    import json as _json
+    from graphify.__main__ import _uninstall_codex_hook
+    (tmp_path / ".codex").mkdir()
+    (tmp_path / ".codex" / "hooks.json").write_text(_json.dumps({"other": "unrelated"}))
+    _uninstall_codex_hook(tmp_path)  # must not raise KeyError
+    # File should be untouched (no graphify entries to remove → no rewrite).
+    assert _json.loads((tmp_path / ".codex" / "hooks.json").read_text()) == {"other": "unrelated"}
+
+
+def test_codex_uninstall_hook_noop_when_no_graphify_entries(tmp_path):
+    """If hooks.PreToolUse exists but contains no graphify entries, uninstall
+    must be a no-op (not rewrite the file with an empty PreToolUse list)."""
+    import json as _json
+    from graphify.__main__ import _uninstall_codex_hook
+    payload = {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"command": "echo other"}]}]}}
+    (tmp_path / ".codex").mkdir()
+    (tmp_path / ".codex" / "hooks.json").write_text(_json.dumps(payload))
+    _uninstall_codex_hook(tmp_path)
+    assert _json.loads((tmp_path / ".codex" / "hooks.json").read_text()) == payload

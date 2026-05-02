@@ -918,6 +918,8 @@ def _uninstall_codex_hook(project_dir: Path) -> None:
         return
     pre_tool = existing.get("hooks", {}).get("PreToolUse", [])
     filtered = [h for h in pre_tool if "graphify" not in str(h)]
+    if len(filtered) == len(pre_tool):
+        return
     existing["hooks"]["PreToolUse"] = filtered
     hooks_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
     _audit_hook_uninstall("codex", [hooks_path])

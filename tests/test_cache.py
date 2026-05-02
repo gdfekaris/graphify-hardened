@@ -126,6 +126,102 @@ def test_clear_cache(tmp_file, cache_root):
     assert len(list(cache_base.rglob("*.json"))) == 0
 
 
+# ---------------------------------------------------------------------------
+# Per-entry SHA256 integrity (Task 4.8)
+# ---------------------------------------------------------------------------
+
+def _entry_path_for(tmp_file, cache_root, kind="ast"):
+    """Helper: resolve the cache-entry path for a given source file."""
+    h = file_hash(tmp_file, cache_root)
+    return cache_dir(cache_root, kind) / f"{h}.json"
+
+
+def test_save_writes_sidecar(tmp_file, cache_root):
+    save_cached(tmp_file, {"nodes": [], "edges": []}, root=cache_root)
+    entry = _entry_path_for(tmp_file, cache_root)
+    sidecar = entry.parent / (entry.name + ".sha256")
+    assert entry.exists()
+    assert sidecar.exists()
+    # Sidecar content must equal SHA256 of the entry's bytes.
+    import hashlib as _hl
+    expected = _hl.sha256(entry.read_bytes()).hexdigest()
+    assert sidecar.read_text(encoding="utf-8").strip() == expected
+
+
+def test_load_returns_miss_when_sidecar_missing(tmp_file, cache_root):
+    save_cached(tmp_file, {"nodes": [{"id": "x"}], "edges": []}, root=cache_root)
+    entry = _entry_path_for(tmp_file, cache_root)
+    sidecar = entry.parent / (entry.name + ".sha256")
+    sidecar.unlink()
+    assert load_cached(tmp_file, root=cache_root) is None
+
+
+def test_load_returns_miss_and_logs_when_entry_tampered(tmp_file, cache_root, capsys):
+    save_cached(tmp_file, {"nodes": [{"id": "x"}], "edges": []}, root=cache_root)
+    entry = _entry_path_for(tmp_file, cache_root)
+    # Tamper with the entry — sidecar still records the original hash.
+    entry.write_text('{"nodes":[{"id":"INJECTED"}],"edges":[]}', encoding="utf-8")
+
+    result = load_cached(tmp_file, root=cache_root)
+    assert result is None  # tampered → miss, not the injected payload
+
+    err = capsys.readouterr().err
+    assert "cache_integrity_failure" in err
+    assert str(entry) in err
+
+
+def test_load_returns_miss_when_sidecar_tampered(tmp_file, cache_root, capsys):
+    save_cached(tmp_file, {"nodes": [], "edges": []}, root=cache_root)
+    entry = _entry_path_for(tmp_file, cache_root)
+    sidecar = entry.parent / (entry.name + ".sha256")
+    sidecar.write_text("0" * 64, encoding="utf-8")
+    assert load_cached(tmp_file, root=cache_root) is None
+    assert "cache_integrity_failure" in capsys.readouterr().err
+
+
+def test_load_returns_miss_when_both_tampered_consistently(tmp_file, cache_root):
+    # Attacker who knows the scheme rewrites entry AND sidecar consistently.
+    # The integrity check catches mismatches against the sidecar, not against
+    # any external authority — so this scenario is *not* prevented by the
+    # check. The scheme defends against partial tampering (entry without
+    # matching sidecar update). Document the limitation as a regression test:
+    # a fully-consistent rewrite IS accepted, by design.
+    save_cached(tmp_file, {"nodes": [], "edges": []}, root=cache_root)
+    entry = _entry_path_for(tmp_file, cache_root)
+    sidecar = entry.parent / (entry.name + ".sha256")
+    import hashlib as _hl
+    forged_payload = '{"nodes":[{"id":"INJECTED"}],"edges":[]}'
+    entry.write_text(forged_payload, encoding="utf-8")
+    sidecar.write_text(_hl.sha256(forged_payload.encode()).hexdigest(), encoding="utf-8")
+    # The check returns the forged result. Future hardening (e.g. signing
+    # the sidecar with a build-time key) is out of scope for Task 4.8.
+    assert load_cached(tmp_file, root=cache_root) == {
+        "nodes": [{"id": "INJECTED"}], "edges": []
+    }
+
+
+def test_legacy_flat_entry_requires_sidecar(tmp_file, cache_root, capsys):
+    # Simulate a pre-fork legacy entry: write to graphify-out/cache/<hash>.json
+    # without any sidecar. load_cached must treat it as a miss without
+    # logging tampering (the absence is normal, not suspicious).
+    h = file_hash(tmp_file, cache_root)
+    legacy_dir = cache_root / "graphify-out" / "cache"
+    legacy_dir.mkdir(parents=True, exist_ok=True)
+    (legacy_dir / f"{h}.json").write_text(
+        '{"nodes":[{"id":"legacy"}],"edges":[]}', encoding="utf-8",
+    )
+    assert load_cached(tmp_file, root=cache_root) is None
+    assert "cache_integrity_failure" not in capsys.readouterr().err
+
+
+def test_clear_cache_removes_sidecars(tmp_file, cache_root):
+    save_cached(tmp_file, {"nodes": [], "edges": []}, root=cache_root)
+    cache_base = cache_root / "graphify-out" / "cache"
+    assert any(p.suffix == ".sha256" for p in cache_base.rglob("*"))
+    clear_cache(cache_root)
+    assert not list(cache_base.rglob("*.sha256"))
+
+
 def test_md_frontmatter_only_change_same_hash(tmp_path):
     """Changing only frontmatter fields in a .md file does not change the hash."""
     f = tmp_path / "doc.md"

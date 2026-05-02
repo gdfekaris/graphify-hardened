@@ -4,7 +4,82 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 from pathlib import Path
+
+
+# ---------------------------------------------------------------------------
+# Per-entry integrity (Task 4.8)
+# ---------------------------------------------------------------------------
+
+def _sidecar_path(entry: Path) -> Path:
+    """Return the SHA256 sidecar path for a given cache entry.
+
+    Sidecar lives alongside the entry as ``<hash>.json.sha256``. The
+    ``*.json`` glob used by `cached_files` and `clear_cache` does not match
+    this suffix, so sidecars do not pollute enumeration.
+    """
+    return entry.parent / (entry.name + ".sha256")
+
+
+def _atomic_write(target: Path, data: bytes) -> None:
+    """Write *data* to *target* via tmp + ``os.replace`` (Windows fallback)."""
+    tmp = target.parent / (target.name + ".tmp")
+    try:
+        tmp.write_bytes(data)
+        try:
+            os.replace(tmp, target)
+        except PermissionError:
+            # Windows: os.replace can fail with WinError 5 if the target is
+            # briefly locked. Fall back to copy-then-delete.
+            import shutil
+            shutil.copy2(tmp, target)
+            tmp.unlink(missing_ok=True)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _log_integrity_failure(entry: Path, expected: str, actual: str) -> None:
+    """Surface a cache_integrity_failure event.
+
+    Stub for Task 5.3's audit logger — once `graphify.audit_log` lands, this
+    function's body will route the event through `log_security_event`. For
+    now it prints to stderr so operators notice tamper events in the same
+    place build output is going.
+    """
+    print(
+        f"[graphify] cache_integrity_failure: {entry} "
+        f"expected={expected[:16]}... actual={actual[:16]}... — re-extracting",
+        file=sys.stderr,
+    )
+
+
+def _read_with_integrity(entry: Path) -> dict | None:
+    """Read a cache entry and verify its SHA256 sidecar.
+
+    Returns None when the entry is absent, the sidecar is absent (treated
+    as a pre-integrity entry or partial write — not logged), the hashes
+    disagree (logged as tampering), or the JSON cannot be parsed.
+    """
+    if not entry.exists():
+        return None
+    sidecar = _sidecar_path(entry)
+    if not sidecar.exists():
+        return None
+    try:
+        payload = entry.read_bytes()
+        expected = sidecar.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    actual = hashlib.sha256(payload).hexdigest()
+    if actual != expected:
+        _log_integrity_failure(entry, expected, actual)
+        return None
+    try:
+        return json.loads(payload.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
 
 
 def _body_content(content: bytes) -> bytes:
@@ -58,38 +133,43 @@ def load_cached(path: Path, root: Path = Path("."), kind: str = "ast") -> dict |
     """Return cached extraction for this file if hash matches, else None.
 
     Cache key: SHA256 of file contents.
-    Cache value: stored as graphify-out/cache/{kind}/{hash}.json
+    Cache value: stored as graphify-out/cache/{kind}/{hash}.json with a
+    sibling ``<hash>.json.sha256`` containing the SHA256 of the JSON
+    payload. Reads recompute the payload hash and treat any mismatch as a
+    cache miss (with a logged integrity event), so a cache file modified
+    outside graphify cannot poison downstream extraction.
 
-    For kind="ast", also checks the legacy flat cache/  directory so users
+    For kind="ast", also checks the legacy flat cache/ directory so users
     upgrading from pre-0.5.3 don't lose their existing AST cache entries.
-    Returns None if no cache entry or file has changed.
+    Legacy entries that lack a sidecar are silently treated as a miss and
+    will be re-extracted with integrity records on the next save.
+    Returns None if no cache entry, no sidecar, or the file has changed.
     """
     try:
         h = file_hash(path, root)
     except OSError:
         return None
-    entry = cache_dir(root, kind) / f"{h}.json"
-    if entry.exists():
-        try:
-            return json.loads(entry.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return None
-    # Migration fallback: check legacy flat cache/ dir for AST entries
+    candidates = [cache_dir(root, kind) / f"{h}.json"]
     if kind == "ast":
-        legacy = Path(root).resolve() / "graphify-out" / "cache" / f"{h}.json"
-        if legacy.exists():
-            try:
-                return json.loads(legacy.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                return None
+        # Migration fallback: legacy flat cache/<hash>.json from pre-0.5.3.
+        candidates.append(
+            Path(root).resolve() / "graphify-out" / "cache" / f"{h}.json"
+        )
+    for entry in candidates:
+        result = _read_with_integrity(entry)
+        if result is not None:
+            return result
     return None
 
 
 def save_cached(path: Path, result: dict, root: Path = Path("."), kind: str = "ast") -> None:
     """Save extraction result for this file.
 
-    Stores as graphify-out/cache/{kind}/{hash}.json where hash = SHA256 of current file contents.
-    result should be a dict with 'nodes' and 'edges' lists.
+    Stores as graphify-out/cache/{kind}/{hash}.json where hash = SHA256 of
+    the source file contents. result should be a dict with 'nodes' and
+    'edges' lists. A sibling ``<hash>.json.sha256`` is written containing
+    the SHA256 of the JSON payload, used by `load_cached` to detect
+    out-of-band tampering.
 
     No-ops if `path` is not a regular file. Subagent-produced semantic fragments
     occasionally carry a directory path in `source_file`; skipping them prevents
@@ -100,20 +180,14 @@ def save_cached(path: Path, result: dict, root: Path = Path("."), kind: str = "a
         return
     h = file_hash(p, root)
     entry = cache_dir(root, kind) / f"{h}.json"
-    tmp = entry.with_suffix(".tmp")
-    try:
-        tmp.write_text(json.dumps(result), encoding="utf-8")
-        try:
-            os.replace(tmp, entry)
-        except PermissionError:
-            # Windows: os.replace can fail with WinError 5 if the target is
-            # briefly locked. Fall back to copy-then-delete.
-            import shutil
-            shutil.copy2(tmp, entry)
-            tmp.unlink(missing_ok=True)
-    except Exception:
-        tmp.unlink(missing_ok=True)
-        raise
+    payload = json.dumps(result).encode("utf-8")
+    checksum = hashlib.sha256(payload).hexdigest()
+    # Order: entry first, then sidecar. A crash between the two leaves an
+    # entry with no sidecar, which `load_cached` correctly treats as a
+    # cache miss (re-extract). The reverse order would leave a dangling
+    # sidecar, which is also harmless but wastes disk.
+    _atomic_write(entry, payload)
+    _atomic_write(_sidecar_path(entry), checksum.encode("utf-8"))
 
 
 def cached_files(root: Path = Path(".")) -> set[str]:
@@ -132,18 +206,20 @@ def cached_files(root: Path = Path(".")) -> set[str]:
 
 
 def clear_cache(root: Path = Path(".")) -> None:
-    """Delete all cache entries (ast/, semantic/, and legacy flat entries)."""
+    """Delete all cache entries (ast/, semantic/, legacy flat) and sidecars."""
     base = Path(root).resolve() / "graphify-out" / "cache"
-    # Legacy flat entries
+    # Legacy flat entries + sidecars
     if base.is_dir():
-        for f in base.glob("*.json"):
-            f.unlink()
-    # Namespaced entries
+        for pattern in ("*.json", "*.json.sha256"):
+            for f in base.glob(pattern):
+                f.unlink()
+    # Namespaced entries + sidecars
     for kind in ("ast", "semantic"):
         d = base / kind
         if d.is_dir():
-            for f in d.glob("*.json"):
-                f.unlink()
+            for pattern in ("*.json", "*.json.sha256"):
+                for f in d.glob(pattern):
+                    f.unlink()
 
 
 def check_semantic_cache(

@@ -28,3 +28,5 @@ scripts/benchmark_kimi*.json
 scripts/benchmark_kimi*.py
 CLAUDE.md
 IMPLEMENTATION_PLAN.md
+BRANCHING_CLEANUP_PLAN.md
+BRANCHING_STRATEGY_GUIDE.md

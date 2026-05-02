@@ -183,11 +183,18 @@ def log_security_event(
 # ---------------------------------------------------------------------------
 
 def _log_path() -> Path:
-    """Resolve the audit log path relative to the current working directory.
+    """Resolve the audit log path.
 
-    Resolved at call time, not import time — tests change cwd, and so do
-    real users when they `cd` into a project. No caching.
+    Honors GRAPHIFY_AUDIT_LOG_PATH for callers that need to redirect
+    (notably the test suite — without this override every test that
+    exercises a wired call site would write into the developer's
+    working tree). When the env var is unset, resolve against
+    ``Path.cwd()`` at call time so the path tracks `cd` into a
+    project. No caching.
     """
+    override = os.environ.get("GRAPHIFY_AUDIT_LOG_PATH")
+    if override:
+        return Path(override)
     return Path.cwd() / _AUDIT_DIR_NAME / _AUDIT_FILE_NAME
 
 

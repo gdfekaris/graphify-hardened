@@ -26,7 +26,13 @@ from graphify.audit import (
 def workdir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Run each test in an isolated cwd. Reset the warn-once cache so the
     'first occurrence' stderr behavior is observable per-test.
+
+    Drops the GRAPHIFY_AUDIT_LOG_PATH override that the conftest autouse
+    fixture sets — these tests verify _log_path's natural cwd-based
+    resolution and the multi-process append, so they need the real path
+    semantics, not the conftest redirect.
     """
+    monkeypatch.delenv("GRAPHIFY_AUDIT_LOG_PATH", raising=False)
     monkeypatch.chdir(tmp_path)
     audit._warned_keys.clear()
     return tmp_path

@@ -137,10 +137,24 @@ def _git_root(path: Path) -> Path | None:
 
 def _hooks_dir(root: Path) -> Path:
     """Return the git hooks directory, respecting core.hooksPath if set (e.g. Husky)."""
+    import time
+    from .audit import log_security_event
+    argv = ["git", "-C", str(root), "config", "core.hooksPath"]
+    t0 = time.monotonic()
     try:
         result = subprocess.run(
-            ["git", "-C", str(root), "config", "core.hooksPath"],
-            capture_output=True, text=True, timeout=5,
+            argv, capture_output=True, text=True, timeout=5,
+        )
+        log_security_event(
+            "subprocess", argv[0], "success" if result.returncode == 0 else "warning",
+            {
+                "binary": argv[0],
+                "argv_redacted": _redact_argv(argv),
+                "exit_code": result.returncode,
+                "duration_s": time.monotonic() - t0,
+                "stdout_bytes": len(result.stdout or ""),
+                "stderr_bytes": len(result.stderr or ""),
+            },
         )
         if result.returncode == 0:
             custom = result.stdout.strip()
@@ -150,29 +164,65 @@ def _hooks_dir(root: Path) -> Path:
                     p = root / p
                 p.mkdir(parents=True, exist_ok=True)
                 return p
-    except (OSError, FileNotFoundError, subprocess.TimeoutExpired):
-        pass
+    except (OSError, FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        log_security_event(
+            "subprocess", argv[0], "error",
+            {
+                "binary": argv[0],
+                "argv_redacted": _redact_argv(argv),
+                "duration_s": time.monotonic() - t0,
+            },
+        )
+        del exc  # silence unused-variable; the type is the audit signal
     d = root / ".git" / "hooks"
     d.mkdir(exist_ok=True)
     return d
 
 
+def _redact_argv(argv: list[str]) -> list[str]:
+    """Replace URL-shaped or path-shaped argv elements with placeholders.
+
+    Mirrors the docs/AUDIT_LOG.md spec for the subprocess action's
+    argv_redacted field. The redaction is structural — element-level —
+    not the substring secret-scrub the audit logger applies on top.
+    """
+    out: list[str] = []
+    for a in argv:
+        if "://" in a:
+            out.append("<url>")
+        elif a.startswith("/") or a.startswith("~") or a.startswith("./") or "\\" in a:
+            out.append("<path>")
+        else:
+            out.append(a)
+    return out
+
+
 def _install_hook(hooks_dir: Path, name: str, script: str, marker: str) -> str:
     """Install a single git hook, appending if an existing hook is present."""
+    from .audit import log_security_event
     hook_path = hooks_dir / name
     if hook_path.exists():
         content = hook_path.read_text(encoding="utf-8")
         if marker in content:
             return f"already installed at {hook_path}"
         hook_path.write_text(content.rstrip() + "\n\n" + script, encoding="utf-8", newline="\n")
+        log_security_event(
+            "install_hook", str(hook_path), "success",
+            {"platform": "git", "paths_modified": [str(hook_path)]},
+        )
         return f"appended to existing {name} hook at {hook_path}"
     hook_path.write_text("#!/bin/sh\n" + script, encoding="utf-8", newline="\n")
     hook_path.chmod(0o755)
+    log_security_event(
+        "install_hook", str(hook_path), "success",
+        {"platform": "git", "paths_modified": [str(hook_path)]},
+    )
     return f"installed at {hook_path}"
 
 
 def _uninstall_hook(hooks_dir: Path, name: str, marker: str, marker_end: str) -> str:
     """Remove graphify section from a git hook using start/end markers."""
+    from .audit import log_security_event
     hook_path = hooks_dir / name
     if not hook_path.exists():
         return f"no {name} hook found - nothing to remove."
@@ -187,8 +237,16 @@ def _uninstall_hook(hooks_dir: Path, name: str, marker: str, marker_end: str) ->
     ).strip()
     if not new_content or new_content in ("#!/bin/bash", "#!/bin/sh"):
         hook_path.unlink()
+        log_security_event(
+            "uninstall_hook", str(hook_path), "success",
+            {"platform": "git", "paths_modified": [str(hook_path)]},
+        )
         return f"removed {name} hook at {hook_path}"
     hook_path.write_text(new_content + "\n", encoding="utf-8", newline="\n")
+    log_security_event(
+        "uninstall_hook", str(hook_path), "success",
+        {"platform": "git", "paths_modified": [str(hook_path)]},
+    )
     return f"graphify removed from {name} at {hook_path} (other hook content preserved)"
 
 

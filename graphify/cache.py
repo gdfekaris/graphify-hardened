@@ -43,11 +43,18 @@ def _atomic_write(target: Path, data: bytes) -> None:
 def _log_integrity_failure(entry: Path, expected: str, actual: str) -> None:
     """Surface a cache_integrity_failure event.
 
-    Stub for Task 5.3's audit logger — once `graphify.audit_log` lands, this
-    function's body will route the event through `log_security_event`. For
-    now it prints to stderr so operators notice tamper events in the same
-    place build output is going.
+    Routes through the audit logger (Phase 5 / Task 5.3) AND prints to
+    stderr — the audit log is for forensic reconstruction, the stderr
+    line is for the operator who is watching the build output. Both
+    matter; neither is a substitute for the other.
     """
+    from .audit import log_security_event
+    log_security_event(
+        "cache_integrity_failure",
+        str(entry),
+        "error",
+        {"cache_key": entry.stem, "expected_sha": expected, "actual_sha": actual},
+    )
     print(
         f"[graphify] cache_integrity_failure: {entry} "
         f"expected={expected[:16]}... actual={actual[:16]}... — re-extracting",

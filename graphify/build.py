@@ -128,6 +128,24 @@ def _quarantine_node(node: dict, log_path: Path | None) -> bool:
         with log_path.open("a", encoding="utf-8") as f:
             for record in flagged_records:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    # Audit-log every flagged node. We aggregate the matched patterns
+    # across all flagged fields on this node into one event so the audit
+    # entry maps 1:1 with the .flagged.json record per node, not per
+    # field. log_path=None (in-memory tests) still emits — the audit log
+    # is a separate concern from the .flagged.json side-channel.
+    from .audit import log_security_event
+    all_patterns = sorted({p for r in flagged_records for p in r["matched_patterns"]})
+    log_security_event(
+        "quarantine_flagged",
+        str(node.get("id", "<unknown>")),
+        "warning",
+        {
+            "node_id": node.get("id"),
+            "matched_patterns": all_patterns,
+            "provenance": _derive_provenance(node),
+        },
+    )
     return True
 
 

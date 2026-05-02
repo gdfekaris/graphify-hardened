@@ -184,28 +184,69 @@ def safe_fetch(url: str, max_bytes: int = _MAX_FETCH_BYTES, timeout: int = 30) -
     opener = _build_opener()
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 graphify/1.0"})
 
-    with _ssrf_guarded_socket(), opener.open(req, timeout=timeout) as resp:
-        # urllib raises HTTPError for non-2xx when using urlopen directly;
-        # with a custom opener we check manually to be safe.
-        status = getattr(resp, "status", None) or getattr(resp, "code", None)
-        if status is not None and not (200 <= status < 300):
-            raise urllib.error.HTTPError(url, status, f"HTTP {status}", {}, None)
+    status_for_audit: int | None = None
+    content_type_for_audit: str | None = None
+    try:
+        with _ssrf_guarded_socket(), opener.open(req, timeout=timeout) as resp:
+            # urllib raises HTTPError for non-2xx when using urlopen directly;
+            # with a custom opener we check manually to be safe.
+            status = getattr(resp, "status", None) or getattr(resp, "code", None)
+            status_for_audit = status
+            try:
+                content_type_for_audit = resp.headers.get("content-type")
+            except (AttributeError, TypeError):
+                pass
+            if status is not None and not (200 <= status < 300):
+                raise urllib.error.HTTPError(url, status, f"HTTP {status}", {}, None)
 
-        chunks: list[bytes] = []
-        total = 0
-        while True:
-            chunk = resp.read(65_536)
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > max_bytes:
-                raise OSError(
-                    f"Response from {url!r} exceeds size limit "
-                    f"({max_bytes // 1_048_576} MB). Aborting download."
-                )
-            chunks.append(chunk)
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                chunk = resp.read(65_536)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise OSError(
+                        f"Response from {url!r} exceeds size limit "
+                        f"({max_bytes // 1_048_576} MB). Aborting download."
+                    )
+                chunks.append(chunk)
+    except Exception:
+        _audit_fetch(url, "error", status_for_audit, None, content_type_for_audit)
+        raise
 
-    return b"".join(chunks)
+    body = b"".join(chunks)
+    _audit_fetch(url, "success", status_for_audit, len(body), content_type_for_audit)
+    return body
+
+
+def _audit_fetch(
+    url: str,
+    result: str,
+    status_code: int | None,
+    body_bytes: int | None,
+    content_type: str | None,
+) -> None:
+    """Best-effort audit emit. Imported lazily to avoid an import cycle
+    with graphify.audit (which has no graphify imports of its own, but
+    this keeps security.py's import graph minimal at module load).
+
+    Type-strict at the boundary: Mock-shaped values from tests can leak
+    into status/content-type via duck-typed urllib response stand-ins,
+    so we only persist int/str values. Anything else is dropped — the
+    field allowlist in audit.py would accept the value but json.dumps
+    would then refuse to serialize a MagicMock.
+    """
+    from .audit import log_security_event
+    details: dict[str, object] = {}
+    if isinstance(status_code, int):
+        details["status_code"] = status_code
+    if isinstance(body_bytes, int):
+        details["bytes"] = body_bytes
+    if isinstance(content_type, str):
+        details["content_type"] = content_type
+    log_security_event("fetch_url", url, result, details)
 
 
 def safe_fetch_with_headers(
@@ -223,31 +264,44 @@ def safe_fetch_with_headers(
     opener = _build_opener()
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 graphify/1.0"})
 
-    with _ssrf_guarded_socket(), opener.open(req, timeout=timeout) as resp:
-        status = getattr(resp, "status", None) or getattr(resp, "code", None)
-        if status is not None and not (200 <= status < 300):
-            raise urllib.error.HTTPError(url, status, f"HTTP {status}", {}, None)
+    status_for_audit: int | None = None
+    content_type_for_audit: str | None = None
+    try:
+        with _ssrf_guarded_socket(), opener.open(req, timeout=timeout) as resp:
+            status = getattr(resp, "status", None) or getattr(resp, "code", None)
+            status_for_audit = status
+            try:
+                content_type_for_audit = resp.headers.get("content-type")
+            except (AttributeError, TypeError):
+                pass
+            if status is not None and not (200 <= status < 300):
+                raise urllib.error.HTTPError(url, status, f"HTTP {status}", {}, None)
 
-        chunks: list[bytes] = []
-        total = 0
-        while True:
-            chunk = resp.read(65_536)
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > max_bytes:
-                raise OSError(
-                    f"Response from {url!r} exceeds size limit "
-                    f"({max_bytes // 1_048_576} MB). Aborting download."
-                )
-            chunks.append(chunk)
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                chunk = resp.read(65_536)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise OSError(
+                        f"Response from {url!r} exceeds size limit "
+                        f"({max_bytes // 1_048_576} MB). Aborting download."
+                    )
+                chunks.append(chunk)
 
-        try:
-            headers = {str(k).lower(): str(v) for k, v in resp.headers.items()}
-        except (AttributeError, TypeError):
-            headers = {}
+            try:
+                headers = {str(k).lower(): str(v) for k, v in resp.headers.items()}
+            except (AttributeError, TypeError):
+                headers = {}
+    except Exception:
+        _audit_fetch(url, "error", status_for_audit, None, content_type_for_audit)
+        raise
 
-    return b"".join(chunks), headers
+    body = b"".join(chunks)
+    _audit_fetch(url, "success", status_for_audit, len(body), content_type_for_audit)
+    return body, headers
 
 
 def safe_fetch_text_with_headers(

@@ -42,7 +42,19 @@ def _check_content_type(content_type: str, allowed_prefixes: tuple[str, ...], ur
         f"ingest: content-type {content_type!r} from {url!r} did not match "
         f"expected prefixes {list(allowed_prefixes)}"
     )
-    if os.environ.get("GRAPHIFY_CONTENT_TYPE_STRICT", "1") == "0":
+    from .audit import log_security_event
+    strict = os.environ.get("GRAPHIFY_CONTENT_TYPE_STRICT", "1") != "0"
+    log_security_event(
+        "content_type_violation",
+        url,
+        "error" if strict else "warning",
+        {
+            "url": url,
+            "expected": ", ".join(allowed_prefixes),
+            "received": content_type or "",
+        },
+    )
+    if not strict:
         warnings.warn(msg, RuntimeWarning, stacklevel=2)
         return
     raise ValueError(msg)

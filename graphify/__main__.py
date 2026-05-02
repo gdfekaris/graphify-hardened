@@ -15,6 +15,51 @@ except Exception:
     __version__ = "unknown"
 
 
+def _audit_install(platform_name: str, paths: list[Path | str]) -> None:
+    """One install_skill event per top-level install entry. paths is the
+    set of files actually created or modified — empty list means no-op
+    (already configured) and we skip the emit."""
+    if not paths:
+        return
+    from .audit import log_security_event
+    log_security_event(
+        "install_skill", platform_name, "success",
+        {"platform": platform_name, "paths_modified": [str(p) for p in paths]},
+    )
+
+
+def _audit_uninstall(platform_name: str, paths: list[Path | str]) -> None:
+    """Counterpart to _audit_install. Empty paths = nothing-to-remove,
+    skip the emit so the audit log doesn't grow on idempotent uninstalls."""
+    if not paths:
+        return
+    from .audit import log_security_event
+    log_security_event(
+        "uninstall_skill", platform_name, "success",
+        {"platform": platform_name, "paths_modified": [str(p) for p in paths]},
+    )
+
+
+def _audit_hook_install(platform_name: str, paths: list[Path | str]) -> None:
+    if not paths:
+        return
+    from .audit import log_security_event
+    log_security_event(
+        "install_hook", platform_name, "success",
+        {"platform": platform_name, "paths_modified": [str(p) for p in paths]},
+    )
+
+
+def _audit_hook_uninstall(platform_name: str, paths: list[Path | str]) -> None:
+    if not paths:
+        return
+    from .audit import log_security_event
+    log_security_event(
+        "uninstall_hook", platform_name, "success",
+        {"platform": platform_name, "paths_modified": [str(p) for p in paths]},
+    )
+
+
 def _check_skill_version(skill_dst: Path) -> None:
     """Warn if the installed skill is from an older graphify version."""
     version_file = skill_dst.parent / ".graphify_version"
@@ -191,6 +236,7 @@ def install(platform: str = "claude") -> None:
         print(f"error: {cfg['skill_file']} not found in package - reinstall graphify", file=sys.stderr)
         sys.exit(1)
 
+    paths: list[Path | str] = []
     import os as _os
     if platform in ("claude", "windows") and _os.environ.get("CLAUDE_CONFIG_DIR"):
         _claude_base = Path(_os.environ["CLAUDE_CONFIG_DIR"])
@@ -200,6 +246,7 @@ def install(platform: str = "claude") -> None:
     skill_dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy(skill_src, skill_dst)
     (skill_dst.parent / ".graphify_version").write_text(__version__, encoding="utf-8")
+    paths.append(skill_dst)
     print(f"  skill installed  ->  {skill_dst}")
 
     if cfg["claude_md"]:
@@ -211,10 +258,12 @@ def install(platform: str = "claude") -> None:
                 print(f"  CLAUDE.md        ->  already registered (no change)")
             else:
                 claude_md.write_text(content.rstrip() + _SKILL_REGISTRATION, encoding="utf-8")
+                paths.append(claude_md)
                 print(f"  CLAUDE.md        ->  skill registered in {claude_md}")
         else:
             claude_md.parent.mkdir(parents=True, exist_ok=True)
             claude_md.write_text(_SKILL_REGISTRATION.lstrip(), encoding="utf-8")
+            paths.append(claude_md)
             print(f"  CLAUDE.md        ->  created at {claude_md}")
 
     if platform == "opencode":
@@ -223,6 +272,8 @@ def install(platform: str = "claude") -> None:
     # Refresh version stamps in all other previously-installed skill dirs so
     # stale-version warnings don't fire for platforms not explicitly re-installed.
     _refresh_all_version_stamps()
+
+    _audit_install(platform, paths)
 
     print()
     print("Done. Open your AI coding assistant and type:")
@@ -297,6 +348,7 @@ _GEMINI_HOOK = {
 
 def gemini_install(project_dir: Path | None = None) -> None:
     """Copy skill file to ~/.gemini/skills/graphify/, write GEMINI.md section, and install BeforeTool hook."""
+    paths: list[Path | str] = []
     # Copy skill file to ~/.gemini/skills/graphify/SKILL.md
     # On Windows, Gemini CLI prioritises ~/.agents/skills/ over ~/.gemini/skills/
     skill_src = Path(__file__).parent / "skill.md"
@@ -307,6 +359,7 @@ def gemini_install(project_dir: Path | None = None) -> None:
     skill_dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy(skill_src, skill_dst)
     (skill_dst.parent / ".graphify_version").write_text(__version__, encoding="utf-8")
+    paths.append(skill_dst)
     print(f"  skill installed  ->  {skill_dst}")
 
     target = (project_dir or Path(".")) / "GEMINI.md"
@@ -317,12 +370,15 @@ def gemini_install(project_dir: Path | None = None) -> None:
             print("graphify already configured in GEMINI.md")
         else:
             target.write_text(content.rstrip() + "\n\n" + _GEMINI_MD_SECTION, encoding="utf-8")
+            paths.append(target)
             print(f"graphify section written to {target.resolve()}")
     else:
         target.write_text(_GEMINI_MD_SECTION, encoding="utf-8")
+        paths.append(target)
         print(f"graphify section written to {target.resolve()}")
 
     _install_gemini_hook(project_dir or Path("."))
+    _audit_install("gemini", paths)
     print()
     print("Gemini CLI will now check the knowledge graph before answering")
     print("codebase questions and rebuild it after code changes.")
@@ -339,6 +395,7 @@ def _install_gemini_hook(project_dir: Path) -> None:
     settings["hooks"]["BeforeTool"] = [h for h in before_tool if "graphify" not in str(h)]
     settings["hooks"]["BeforeTool"].append(_GEMINI_HOOK)
     settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    _audit_hook_install("gemini", [settings_path])
     print("  .gemini/settings.json  ->  BeforeTool hook registered")
 
 
@@ -356,11 +413,13 @@ def _uninstall_gemini_hook(project_dir: Path) -> None:
         return
     settings["hooks"]["BeforeTool"] = filtered
     settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    _audit_hook_uninstall("gemini", [settings_path])
     print("  .gemini/settings.json  ->  BeforeTool hook removed")
 
 
 def gemini_uninstall(project_dir: Path | None = None) -> None:
     """Remove the graphify section from GEMINI.md, uninstall hook, and remove skill file."""
+    paths: list[Path | str] = []
     # Remove skill file (mirror the install path detection)
     if platform.system() == "Windows":
         skill_dst = Path.home() / ".agents" / "skills" / "graphify" / "SKILL.md"
@@ -368,6 +427,7 @@ def gemini_uninstall(project_dir: Path | None = None) -> None:
         skill_dst = Path.home() / ".gemini" / "skills" / "graphify" / "SKILL.md"
     if skill_dst.exists():
         skill_dst.unlink()
+        paths.append(skill_dst)
         print(f"  skill removed    ->  {skill_dst}")
     version_file = skill_dst.parent / ".graphify_version"
     if version_file.exists():
@@ -381,19 +441,24 @@ def gemini_uninstall(project_dir: Path | None = None) -> None:
     target = (project_dir or Path(".")) / "GEMINI.md"
     if not target.exists():
         print("No GEMINI.md found in current directory - nothing to do")
+        _audit_uninstall("gemini", paths)
         return
     content = target.read_text(encoding="utf-8")
     if _GEMINI_MD_MARKER not in content:
         print("graphify section not found in GEMINI.md - nothing to do")
+        _audit_uninstall("gemini", paths)
         return
     cleaned = re.sub(r"\n*## graphify\n.*?(?=\n## |\Z)", "", content, flags=re.DOTALL).rstrip()
     if cleaned:
         target.write_text(cleaned + "\n", encoding="utf-8")
+        paths.append(target)
         print(f"graphify section removed from {target.resolve()}")
     else:
         target.unlink()
+        paths.append(target)
         print(f"GEMINI.md was empty after removal - deleted {target.resolve()}")
     _uninstall_gemini_hook(project_dir or Path("."))
+    _audit_uninstall("gemini", paths)
 
 
 _VSCODE_INSTRUCTIONS_MARKER = "## graphify"
@@ -409,6 +474,7 @@ Type `/graphify` in Copilot Chat to build or update the knowledge graph.
 
 def vscode_install(project_dir: Path | None = None) -> None:
     """Install graphify skill for VS Code Copilot Chat + write .github/copilot-instructions.md."""
+    paths: list[Path | str] = []
     skill_src = Path(__file__).parent / "skill-vscode.md"
     if not skill_src.exists():
         skill_src = Path(__file__).parent / "skill-copilot.md"
@@ -416,6 +482,7 @@ def vscode_install(project_dir: Path | None = None) -> None:
     skill_dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy(skill_src, skill_dst)
     (skill_dst.parent / ".graphify_version").write_text(__version__, encoding="utf-8")
+    paths.append(skill_dst)
     print(f"  skill installed  ->  {skill_dst}")
 
     instructions = (project_dir or Path(".")) / ".github" / "copilot-instructions.md"
@@ -426,11 +493,14 @@ def vscode_install(project_dir: Path | None = None) -> None:
             print(f"  {instructions}  ->  already configured (no change)")
         else:
             instructions.write_text(content.rstrip() + "\n\n" + _VSCODE_INSTRUCTIONS_SECTION, encoding="utf-8")
+            paths.append(instructions)
             print(f"  {instructions}  ->  graphify section added")
     else:
         instructions.write_text(_VSCODE_INSTRUCTIONS_SECTION, encoding="utf-8")
+        paths.append(instructions)
         print(f"  {instructions}  ->  created")
 
+    _audit_install("vscode", paths)
     print()
     print("VS Code Copilot Chat configured. Type /graphify in the chat panel to build the graph.")
     print("Note: for GitHub Copilot CLI (terminal), use: graphify copilot install")
@@ -438,9 +508,11 @@ def vscode_install(project_dir: Path | None = None) -> None:
 
 def vscode_uninstall(project_dir: Path | None = None) -> None:
     """Remove graphify VS Code Copilot Chat skill and .github/copilot-instructions.md section."""
+    paths: list[Path | str] = []
     skill_dst = Path.home() / ".copilot" / "skills" / "graphify" / "SKILL.md"
     if skill_dst.exists():
         skill_dst.unlink()
+        paths.append(skill_dst)
         print(f"  skill removed    ->  {skill_dst}")
     version_file = skill_dst.parent / ".graphify_version"
     if version_file.exists():
@@ -453,17 +525,22 @@ def vscode_uninstall(project_dir: Path | None = None) -> None:
 
     instructions = (project_dir or Path(".")) / ".github" / "copilot-instructions.md"
     if not instructions.exists():
+        _audit_uninstall("vscode", paths)
         return
     content = instructions.read_text(encoding="utf-8")
     if _VSCODE_INSTRUCTIONS_MARKER not in content:
+        _audit_uninstall("vscode", paths)
         return
     cleaned = re.sub(r"\n*## graphify\n.*?(?=\n## |\Z)", "", content, flags=re.DOTALL).rstrip()
     if cleaned:
         instructions.write_text(cleaned + "\n", encoding="utf-8")
+        paths.append(instructions)
         print(f"  graphify section removed from {instructions}")
     else:
         instructions.unlink()
+        paths.append(instructions)
         print(f"  {instructions}  ->  deleted (was empty after removal)")
+    _audit_uninstall("vscode", paths)
 
 
 _ANTIGRAVITY_RULES_PATH = Path(".agents") / "rules" / "graphify.md"
@@ -513,12 +590,14 @@ _KIRO_STEERING_MARKER = "graphify: A knowledge graph of this project"
 def _kiro_install(project_dir: Path) -> None:
     """Write graphify skill + steering file for Kiro IDE/CLI."""
     project_dir = project_dir or Path(".")
+    paths: list[Path | str] = []
 
     # Skill file → .kiro/skills/graphify/SKILL.md
     skill_src = Path(__file__).parent / "skill-kiro.md"
     skill_dst = project_dir / ".kiro" / "skills" / "graphify" / "SKILL.md"
     skill_dst.parent.mkdir(parents=True, exist_ok=True)
     skill_dst.write_text(skill_src.read_text(encoding="utf-8"), encoding="utf-8")
+    paths.append(skill_dst)
     print(f"  {skill_dst.relative_to(project_dir)}  ->  /graphify skill")
 
     # Steering file → .kiro/steering/graphify.md (always-on)
@@ -529,8 +608,10 @@ def _kiro_install(project_dir: Path) -> None:
         print(f"  .kiro/steering/graphify.md  ->  already configured")
     else:
         steering_dst.write_text(_KIRO_STEERING, encoding="utf-8")
+        paths.append(steering_dst)
         print(f"  .kiro/steering/graphify.md  ->  always-on steering written")
 
+    _audit_install("kiro", paths)
     print()
     print("Kiro will now read the knowledge graph before every conversation.")
     print("Use /graphify to build or update the graph.")
@@ -540,11 +621,13 @@ def _kiro_uninstall(project_dir: Path) -> None:
     """Remove graphify skill + steering file for Kiro."""
     project_dir = project_dir or Path(".")
     removed = []
+    paths: list[Path | str] = []
 
     skill_dst = project_dir / ".kiro" / "skills" / "graphify" / "SKILL.md"
     if skill_dst.exists():
         skill_dst.unlink()
         removed.append(str(skill_dst.relative_to(project_dir)))
+        paths.append(skill_dst)
         # Remove parent dir if empty
         try:
             skill_dst.parent.rmdir()
@@ -555,13 +638,18 @@ def _kiro_uninstall(project_dir: Path) -> None:
     if steering_dst.exists():
         steering_dst.unlink()
         removed.append(str(steering_dst.relative_to(project_dir)))
+        paths.append(steering_dst)
 
+    _audit_uninstall("kiro", paths)
     print("Removed: " + (", ".join(removed) if removed else "nothing to remove"))
 
 
 def _antigravity_install(project_dir: Path) -> None:
     """Install graphify for Google Antigravity: skill + .agents/rules + .agents/workflows."""
+    paths: list[Path | str] = []
     # 1. Copy skill file to ~/.agents/skills/graphify/SKILL.md
+    # Note: install() emits its own install_skill event for the generic skill copy.
+    # We emit a separate one here for the Antigravity-specific files.
     install(platform="antigravity")
 
     # 1.5. Inject YAML frontmatter for native Antigravity tool discovery
@@ -579,6 +667,7 @@ def _antigravity_install(project_dir: Path) -> None:
         print(f"graphify rule already exists at {rules_path} (no change)")
     else:
         rules_path.write_text(_ANTIGRAVITY_RULES, encoding="utf-8")
+        paths.append(rules_path)
         print(f"graphify rule written to {rules_path.resolve()}")
 
     # 3. Write .agents/workflows/graphify.md
@@ -588,7 +677,10 @@ def _antigravity_install(project_dir: Path) -> None:
         print(f"graphify workflow already exists at {wf_path} (no change)")
     else:
         wf_path.write_text(_ANTIGRAVITY_WORKFLOW, encoding="utf-8")
+        paths.append(wf_path)
         print(f"graphify workflow written to {wf_path.resolve()}")
+
+    _audit_install("antigravity", paths)
 
     print()
     print("Antigravity will now check the knowledge graph before answering")
@@ -603,10 +695,12 @@ def _antigravity_install(project_dir: Path) -> None:
 
 def _antigravity_uninstall(project_dir: Path) -> None:
     """Remove graphify Antigravity rules, workflow, and skill files."""
+    paths: list[Path | str] = []
     # Remove rules file
     rules_path = project_dir / _ANTIGRAVITY_RULES_PATH
     if rules_path.exists():
         rules_path.unlink()
+        paths.append(rules_path)
         print(f"graphify rule removed from {rules_path.resolve()}")
     else:
         print("No graphify Antigravity rule found - nothing to do")
@@ -615,12 +709,14 @@ def _antigravity_uninstall(project_dir: Path) -> None:
     wf_path = project_dir / _ANTIGRAVITY_WORKFLOW_PATH
     if wf_path.exists():
         wf_path.unlink()
+        paths.append(wf_path)
         print(f"graphify workflow removed from {wf_path.resolve()}")
 
     # Remove skill file
     skill_dst = Path.home() / _PLATFORM_CONFIG["antigravity"]["skill_dst"]
     if skill_dst.exists():
         skill_dst.unlink()
+        paths.append(skill_dst)
         print(f"graphify skill removed from {skill_dst}")
     version_file = skill_dst.parent / ".graphify_version"
     if version_file.exists():
@@ -630,6 +726,8 @@ def _antigravity_uninstall(project_dir: Path) -> None:
             d.rmdir()
         except OSError:
             break
+
+    _audit_uninstall("antigravity", paths)
 
 
 _CURSOR_RULE_PATH = Path(".cursor") / "rules" / "graphify.mdc"
@@ -656,6 +754,7 @@ def _cursor_install(project_dir: Path) -> None:
         print(f"graphify rule already exists at {rule_path} (no change)")
         return
     rule_path.write_text(_CURSOR_RULE, encoding="utf-8")
+    _audit_install("cursor", [rule_path])
     print(f"graphify rule written to {rule_path.resolve()}")
     print()
     print("Cursor will now always include the knowledge graph context.")
@@ -669,6 +768,7 @@ def _cursor_uninstall(project_dir: Path) -> None:
         print("No graphify Cursor rule found - nothing to do")
         return
     rule_path.unlink()
+    _audit_uninstall("cursor", [rule_path])
     print(f"graphify Cursor rule removed from {rule_path.resolve()}")
 
 
@@ -705,9 +805,11 @@ _OPENCODE_CONFIG_PATH = Path(".opencode") / "opencode.json"
 
 def _install_opencode_plugin(project_dir: Path) -> None:
     """Write graphify.js plugin and register it in opencode.json."""
+    paths: list[Path | str] = []
     plugin_file = project_dir / _OPENCODE_PLUGIN_PATH
     plugin_file.parent.mkdir(parents=True, exist_ok=True)
     plugin_file.write_text(_OPENCODE_PLUGIN_JS, encoding="utf-8")
+    paths.append(plugin_file)
     print(f"  {_OPENCODE_PLUGIN_PATH}  ->  tool.execute.before hook written")
 
     config_file = project_dir / _OPENCODE_CONFIG_PATH
@@ -724,24 +826,30 @@ def _install_opencode_plugin(project_dir: Path) -> None:
     if entry not in plugins:
         plugins.append(entry)
         config_file.write_text(json.dumps(config, indent=2), encoding="utf-8")
+        paths.append(config_file)
         print(f"  {_OPENCODE_CONFIG_PATH}  ->  plugin registered")
     else:
         print(f"  {_OPENCODE_CONFIG_PATH}  ->  plugin already registered (no change)")
+    _audit_hook_install("opencode", paths)
 
 
 def _uninstall_opencode_plugin(project_dir: Path) -> None:
     """Remove graphify.js plugin and deregister from opencode.json."""
+    paths: list[Path | str] = []
     plugin_file = project_dir / _OPENCODE_PLUGIN_PATH
     if plugin_file.exists():
         plugin_file.unlink()
+        paths.append(plugin_file)
         print(f"  {_OPENCODE_PLUGIN_PATH}  ->  removed")
 
     config_file = project_dir / _OPENCODE_CONFIG_PATH
     if not config_file.exists():
+        _audit_hook_uninstall("opencode", paths)
         return
     try:
         config = json.loads(config_file.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
+        _audit_hook_uninstall("opencode", paths)
         return
     plugins = config.get("plugin", [])
     entry = _OPENCODE_PLUGIN_PATH.as_posix()
@@ -750,7 +858,9 @@ def _uninstall_opencode_plugin(project_dir: Path) -> None:
         if not plugins:
             config.pop("plugin")
         config_file.write_text(json.dumps(config, indent=2), encoding="utf-8")
+        paths.append(config_file)
         print(f"  {_OPENCODE_CONFIG_PATH}  ->  plugin deregistered")
+    _audit_hook_uninstall("opencode", paths)
 
 
 _CODEX_HOOK = {
@@ -793,6 +903,7 @@ def _install_codex_hook(project_dir: Path) -> None:
     existing["hooks"]["PreToolUse"] = [h for h in pre_tool if "graphify" not in str(h)]
     existing["hooks"]["PreToolUse"].extend(_CODEX_HOOK["hooks"]["PreToolUse"])
     hooks_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+    _audit_hook_install("codex", [hooks_path])
     print(f"  .codex/hooks.json  ->  PreToolUse hook registered")
 
 
@@ -809,11 +920,13 @@ def _uninstall_codex_hook(project_dir: Path) -> None:
     filtered = [h for h in pre_tool if "graphify" not in str(h)]
     existing["hooks"]["PreToolUse"] = filtered
     hooks_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+    _audit_hook_uninstall("codex", [hooks_path])
     print(f"  .codex/hooks.json  ->  PreToolUse hook removed")
 
 
 def _agents_install(project_dir: Path, platform: str) -> None:
     """Write the graphify section to the local AGENTS.md (Codex/OpenCode/OpenClaw)."""
+    paths: list[Path | str] = []
     target = (project_dir or Path(".")) / "AGENTS.md"
 
     if target.exists():
@@ -822,9 +935,11 @@ def _agents_install(project_dir: Path, platform: str) -> None:
             print(f"graphify already configured in AGENTS.md")
         else:
             target.write_text(content.rstrip() + "\n\n" + _AGENTS_MD_SECTION, encoding="utf-8")
+            paths.append(target)
             print(f"graphify section written to {target.resolve()}")
     else:
         target.write_text(_AGENTS_MD_SECTION, encoding="utf-8")
+        paths.append(target)
         print(f"graphify section written to {target.resolve()}")
 
     if platform == "codex":
@@ -832,6 +947,7 @@ def _agents_install(project_dir: Path, platform: str) -> None:
     elif platform == "opencode":
         _install_opencode_plugin(project_dir or Path("."))
 
+    _audit_install(platform, paths)
     print()
     print(f"{platform.capitalize()} will now check the knowledge graph before answering")
     print("codebase questions and rebuild it after code changes.")
@@ -860,12 +976,14 @@ def _agents_uninstall(project_dir: Path, platform: str = "") -> None:
         content,
         flags=re.DOTALL,
     ).rstrip()
+    paths: list[Path | str] = [target]
     if cleaned:
         target.write_text(cleaned + "\n", encoding="utf-8")
         print(f"graphify section removed from {target.resolve()}")
     else:
         target.unlink()
         print(f"AGENTS.md was empty after removal - deleted {target.resolve()}")
+    _audit_uninstall(platform or "agents", paths)
 
     if platform == "opencode":
         _uninstall_opencode_plugin(project_dir or Path("."))
@@ -885,6 +1003,7 @@ def claude_install(project_dir: Path | None = None) -> None:
         new_content = _CLAUDE_MD_SECTION
 
     target.write_text(new_content, encoding="utf-8")
+    _audit_install("claude", [target])
     print(f"graphify section written to {target.resolve()}")
 
     # Also write Claude Code PreToolUse hook to .claude/settings.json
@@ -914,6 +1033,7 @@ def _install_claude_hook(project_dir: Path) -> None:
     hooks["PreToolUse"] = [h for h in pre_tool if not (h.get("matcher") in ("Glob|Grep", "Bash") and "graphify" in str(h))]
     hooks["PreToolUse"].append(_SETTINGS_HOOK)
     settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    _audit_hook_install("claude", [settings_path])
     print(f"  .claude/settings.json  ->  PreToolUse hook registered")
 
 
@@ -932,6 +1052,7 @@ def _uninstall_claude_hook(project_dir: Path) -> None:
         return
     settings["hooks"]["PreToolUse"] = filtered
     settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    _audit_hook_uninstall("claude", [settings_path])
     print(f"  .claude/settings.json  ->  PreToolUse hook removed")
 
 
@@ -961,6 +1082,7 @@ def claude_uninstall(project_dir: Path | None = None) -> None:
     else:
         target.unlink()
         print(f"CLAUDE.md was empty after removal - deleted {target.resolve()}")
+    _audit_uninstall("claude", [target])
 
     _uninstall_claude_hook(project_dir or Path("."))
 
@@ -1071,6 +1193,9 @@ def _clone_repo(url: str, branch: str | None = None, out_dir: Path | None = None
     runs on the same URL reuse the existing clone (git pull instead of clone).
     """
     import subprocess as _sp
+    import time as _time
+    from .audit import log_security_event
+    from .hooks import _redact_argv
 
     try:
         parsed = _parse_git_url(url)
@@ -1096,18 +1221,45 @@ def _clone_repo(url: str, branch: str | None = None, out_dir: Path | None = None
     # past that, we'd rather fail loudly than hang a CLI invocation forever.
     _GIT_NETWORK_TIMEOUT = 300
 
+    op_start = _time.monotonic()
+
+    def _audit_subprocess(cmd: list[str], result_obj, exc_kind: str | None) -> None:
+        """One subprocess event per git invocation. exc_kind != None when
+        TimeoutExpired or another exception fired (result_obj is None)."""
+        details: dict[str, object] = {
+            "binary": cmd[0],
+            "argv_redacted": _redact_argv(cmd),
+            "duration_s": _time.monotonic() - sub_start,
+        }
+        if result_obj is not None:
+            details["exit_code"] = result_obj.returncode
+            details["stdout_bytes"] = len(result_obj.stdout or "")
+            details["stderr_bytes"] = len(result_obj.stderr or "")
+            outcome = "success" if result_obj.returncode == 0 else "warning"
+        else:
+            outcome = "error"
+        log_security_event("subprocess", cmd[0], outcome, details)
+
     if dest.exists():
         print(f"Repo already cloned at {dest} — pulling latest...", flush=True)
         cmd = ["git", "-C", str(dest), "pull"]
         if branch:
             cmd += ["--", "origin", branch]
+        sub_start = _time.monotonic()
         try:
             result = _sp.run(cmd, capture_output=True, text=True, timeout=_GIT_NETWORK_TIMEOUT)
+            _audit_subprocess(cmd, result, None)
         except _sp.TimeoutExpired:
+            _audit_subprocess(cmd, None, "timeout")
             print(
                 f"warning: git pull timed out after {_GIT_NETWORK_TIMEOUT}s; "
                 f"using stale clone at {dest}",
                 file=sys.stderr,
+            )
+            log_security_event(
+                "clone_repo", git_url, "warning",
+                {"host": parsed["host"], "owner": owner, "repo": repo,
+                 "dest": str(dest), "duration_s": _time.monotonic() - op_start},
             )
             print(f"Ready at: {dest}", flush=True)
             return dest
@@ -1120,18 +1272,36 @@ def _clone_repo(url: str, branch: str | None = None, out_dir: Path | None = None
         if branch:
             cmd += ["--branch", branch]
         cmd += ["--", git_url, str(dest)]
+        sub_start = _time.monotonic()
         try:
             result = _sp.run(cmd, capture_output=True, text=True, timeout=_GIT_NETWORK_TIMEOUT)
+            _audit_subprocess(cmd, result, None)
         except _sp.TimeoutExpired:
+            _audit_subprocess(cmd, None, "timeout")
+            log_security_event(
+                "clone_repo", git_url, "error",
+                {"host": parsed["host"], "owner": owner, "repo": repo,
+                 "dest": str(dest), "duration_s": _time.monotonic() - op_start},
+            )
             print(
                 f"error: git clone timed out after {_GIT_NETWORK_TIMEOUT}s",
                 file=sys.stderr,
             )
             sys.exit(1)
         if result.returncode != 0:
+            log_security_event(
+                "clone_repo", git_url, "error",
+                {"host": parsed["host"], "owner": owner, "repo": repo,
+                 "dest": str(dest), "duration_s": _time.monotonic() - op_start},
+            )
             print(f"error: git clone failed:\n{result.stderr}", file=sys.stderr)
             sys.exit(1)
 
+    log_security_event(
+        "clone_repo", git_url, "success",
+        {"host": parsed["host"], "owner": owner, "repo": repo,
+         "dest": str(dest), "duration_s": _time.monotonic() - op_start},
+    )
     print(f"Ready at: {dest}", flush=True)
     return dest
 

@@ -1,7 +1,57 @@
 """Tests for graphify/cache.py."""
+import ast
 import pytest
 from pathlib import Path
 from graphify.cache import file_hash, cache_dir, load_cached, save_cached, cached_files, clear_cache, _body_content
+
+
+# ---------------------------------------------------------------------------
+# Deserialization-safety regression (Task 4.7)
+# ---------------------------------------------------------------------------
+
+# These modules can deserialize attacker-controlled bytes into arbitrary code
+# execution (pickle/dill/cloudpickle/joblib/shelve all use the pickle wire
+# format; marshal is documented as unsafe for untrusted input). The cache,
+# and the rest of graphify, must not depend on any of them. AST-scanning the
+# package's own source is more reliable than checking sys.modules — pytest's
+# own machinery imports pickle indirectly, so a sys.modules check would have
+# false positives.
+_UNSAFE_DESERIALIZERS = {"pickle", "cPickle", "dill", "marshal", "shelve",
+                         "joblib", "cloudpickle"}
+
+
+def _imported_modules(py_file: Path) -> set[str]:
+    """Return the set of top-level module names imported by *py_file*."""
+    tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                names.add(alias.name.split(".", 1)[0])
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                names.add(node.module.split(".", 1)[0])
+    return names
+
+
+def test_cache_module_does_not_import_unsafe_deserializers():
+    """Direct regression for the spec: graphify.cache must be JSON-only."""
+    cache_py = Path(__file__).resolve().parent.parent / "graphify" / "cache.py"
+    imports = _imported_modules(cache_py)
+    bad = imports & _UNSAFE_DESERIALIZERS
+    assert not bad, f"graphify/cache.py imports unsafe deserializer(s): {sorted(bad)}"
+
+
+def test_no_unsafe_deserializers_anywhere_in_graphify():
+    """Scan the whole package — a pickle import outside cache.py would still
+    be a code-execution vector if it touches user-controlled bytes."""
+    pkg = Path(__file__).resolve().parent.parent / "graphify"
+    offenders: dict[str, set[str]] = {}
+    for py_file in pkg.rglob("*.py"):
+        bad = _imported_modules(py_file) & _UNSAFE_DESERIALIZERS
+        if bad:
+            offenders[str(py_file.relative_to(pkg))] = bad
+    assert not offenders, f"unsafe deserializer imports found: {offenders}"
 
 
 @pytest.fixture

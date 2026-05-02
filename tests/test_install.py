@@ -32,9 +32,17 @@ def test_install_codex(tmp_path):
     assert (tmp_path / ".agents" / "skills" / "graphify" / "SKILL.md").exists()
 
 
-def test_install_opencode(tmp_path):
+def test_install_opencode(tmp_path, monkeypatch):
+    # install("opencode") calls _install_opencode_plugin(Path(".")) which writes
+    # `.opencode/plugins/graphify.js` and `.opencode/opencode.json` into CWD,
+    # not into HOME — so we must chdir to tmp_path to avoid polluting the dev
+    # tree. Documented in audit/skill-installer-review.md (F6); the asymmetry
+    # itself is deferred to Task 6.2 (F2/F3 surface merge).
+    monkeypatch.chdir(tmp_path)
     _install(tmp_path, "opencode")
     assert (tmp_path / ".config" / "opencode" / "skills" / "graphify" / "SKILL.md").exists()
+    assert (tmp_path / ".opencode" / "plugins" / "graphify.js").exists()
+    assert (tmp_path / ".opencode" / "opencode.json").exists()
 
 
 def test_install_claw(tmp_path):

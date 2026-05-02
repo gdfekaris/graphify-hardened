@@ -1,8 +1,10 @@
 # Phase 3 Task 3.7 — cross-reference for `graphify status`
 
-Task 3.7 is satisfied by the implementation of Task 5.4 (the `graphify
-status` command). This file records the dependency so the requirement is
-not lost between phases.
+**Status:** SATISFIED by Task 5.4. Implementation is `graphify.__main__.status`,
+CLI dispatch is `graphify status`, with `--show-flagged-text` for the
+gated original text. Tests are in `tests/test_status.py`. The remainder
+of this doc records the original requirement and the post-implementation
+acceptance check.
 
 ## What 3.7 requires from `graphify status`
 
@@ -38,14 +40,20 @@ When the `status` command is built in Phase 5, it MUST:
 
 ## Acceptance for 3.7
 
-- A test in the Phase 5 `tests/test_status.py` (or wherever 5.4 lands)
-  that:
-  - Builds a graph in `--untrusted-corpus` mode and asserts the mode
-    line appears in `graphify status` output.
-  - Builds a graph against a corpus with one injection-flagged label
-    and asserts `status` prints "1 flagged" and one record summary.
-- Reference back to this file from the 5.4 commit message so the
-  Phase 3 trail closes.
+Met by the test set in `tests/test_status.py`:
+
+- `test_status_reports_untrusted_corpus_mode` — builds a graph.json
+  with `graph: {mode: "untrusted-corpus"}` and asserts the
+  `UNTRUSTED-CORPUS` marker is in the status output.
+- `test_status_reports_flagged_count` — writes flagged records to
+  `graphify-out/.flagged.json` and asserts the count + recent summary
+  appear (with the actual node_id and matched_patterns visible).
+- `test_status_omits_original_text_by_default` /
+  `test_status_shows_original_text_when_flag_passed` — verify the
+  `--show-flagged-text` gate works in both directions; the redacted
+  text is never surfaced unless explicitly asked for.
+
+The 5.4 commit references this file by path.
 
 ## Pointers
 

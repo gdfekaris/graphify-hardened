@@ -1306,6 +1306,137 @@ def _clone_repo(url: str, branch: str | None = None, out_dir: Path | None = None
     return dest
 
 
+# ---------------------------------------------------------------------------
+# `graphify status` — Phase 5 / Task 5.4 (also closes Task 3.7 cross-ref)
+# ---------------------------------------------------------------------------
+# Surface order is deliberate: flagged content first, build mode second,
+# audit events third — these are the security-relevant signals. Skill
+# and hook install state come after; they are operational, not security
+# events. See audit/phase3-task3.7-status-crossref.md for the rationale
+# behind the flagged-content surfacing.
+
+def _read_jsonl(path: Path) -> list[dict]:
+    """Read a JSONL file, skipping blank lines and unparseable records."""
+    out: list[dict] = []
+    if not path.exists():
+        return out
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return out
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out
+
+
+def status(*, show_flagged_text: bool = False) -> None:
+    """Report flagged content, build mode, recent audit events, installs.
+
+    The argument is exposed so tests can drive the --show-flagged-text
+    branch without pickling the full sys.argv parser. The CLI dispatch
+    in main() reads sys.argv directly and forwards the flag.
+    """
+    print("graphify status")
+    print()
+
+    # 1. Flagged content (security-prominent — Task 3.4 + 3.7 close-out)
+    flagged_path = Path("graphify-out/.flagged.json")
+    flagged = _read_jsonl(flagged_path)
+    if flagged:
+        print(f"Flagged content: {len(flagged)} record(s) in {flagged_path}")
+        recent = flagged[-5:]
+        for rec in recent:
+            print(
+                f"  - {rec.get('node_id', '<unknown>')} "
+                f"[{rec.get('field_name', '?')}] "
+                f"matched={rec.get('matched_patterns', [])}  "
+                f"prov={rec.get('provenance', [])}  "
+                f"ts={rec.get('ts', '?')}"
+            )
+        if show_flagged_text:
+            print()
+            print("Flagged text (--show-flagged-text):")
+            for rec in recent:
+                print(f"  {rec.get('node_id')}: {rec.get('original_text', '')!r}")
+        else:
+            print("  (re-run with --show-flagged-text to see original_text)")
+    else:
+        print("Flagged content: 0 records")
+    print()
+
+    # 2. Graph build mode (Task 3.6 close-out)
+    graph_path = Path("graphify-out/graph.json")
+    if graph_path.exists():
+        try:
+            from graphify.untrusted import is_untrusted_corpus_graph
+            data = json.loads(graph_path.read_text(encoding="utf-8"))
+            if is_untrusted_corpus_graph(data):
+                print("Graph mode: UNTRUSTED-CORPUS (metadata-only build — "
+                      "downstream consumers see file metadata, not content)")
+            else:
+                print("Graph mode: standard")
+        except (json.JSONDecodeError, OSError):
+            print("Graph mode: graph.json present but unreadable")
+    else:
+        print("Graph mode: no graph.json")
+    print()
+
+    # 3. Recent audit events. Resolve the path through the audit module
+    # so GRAPHIFY_AUDIT_LOG_PATH is honored — same resolver as the writer.
+    from graphify.audit import _log_path as _audit_log_path
+    audit_path = _audit_log_path()
+    if audit_path.exists():
+        lines = audit_path.read_text(encoding="utf-8").splitlines()
+        valid = [l for l in lines if l.strip()]
+        print(f"Recent audit events ({len(valid)} total, showing last 10):")
+        for line in valid[-10:]:
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            ts = rec.get("ts", "?")
+            action = rec.get("action", "?")
+            target = rec.get("target", "?")
+            result = rec.get("result", "?")
+            print(f"  {ts}  {action:24} {result:8} {target}")
+    else:
+        print("Recent audit events: 0 (no audit log yet)")
+    print()
+
+    # 4. Skill installs per platform. Probe Path.home() / cfg["skill_dst"]
+    # the same way the install paths build it.
+    print("Installed skills:")
+    any_installed = False
+    for plat_name, cfg in sorted(_PLATFORM_CONFIG.items()):
+        skill_path = Path.home() / cfg["skill_dst"]
+        if skill_path.exists():
+            any_installed = True
+            ver_path = skill_path.parent / ".graphify_version"
+            ver = (
+                ver_path.read_text(encoding="utf-8").strip()
+                if ver_path.exists() else "unknown"
+            )
+            print(f"  {plat_name:14} {skill_path}  (v{ver})")
+    if not any_installed:
+        print("  (none)")
+    print()
+
+    # 5. Git hooks for the current project. Reuse hooks.status which
+    # already computes per-hook installed/not-installed.
+    print("Git hooks:")
+    try:
+        from graphify.hooks import status as hook_status
+        for line in hook_status(Path(".")).splitlines():
+            print(f"  {line}")
+    except Exception as exc:  # noqa: BLE001 — hook_status raises in non-repo
+        print(f"  (unavailable: {exc})")
+
+
 def main() -> None:
     # Check all known skill install locations for a stale version stamp.
     # Skip during install/uninstall (hook writes trigger a fresh check anyway).
@@ -1350,6 +1481,8 @@ def main() -> None:
         print("  hook install            install post-commit/post-checkout git hooks (all platforms)")
         print("  hook uninstall          remove git hooks")
         print("  hook status             check if git hooks are installed")
+        print("  status                  show flagged content, build mode, recent audit events, installs")
+        print("    --show-flagged-text     also print the original (redacted) text of flagged nodes")
         print("  gemini install          write GEMINI.md section + BeforeTool hook (Gemini CLI)")
         print("  gemini uninstall        remove GEMINI.md section + BeforeTool hook")
         print("  cursor install          write .cursor/rules/graphify.mdc (Cursor)")
@@ -1499,6 +1632,8 @@ def main() -> None:
         else:
             print("Usage: graphify hook [install|uninstall|status]", file=sys.stderr)
             sys.exit(1)
+    elif cmd == "status":
+        status(show_flagged_text="--show-flagged-text" in sys.argv)
     elif cmd == "query":
         if len(sys.argv) < 3:
             print("Usage: graphify query \"<question>\" [--dfs] [--budget N] [--graph path]", file=sys.stderr)

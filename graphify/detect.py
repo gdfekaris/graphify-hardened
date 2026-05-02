@@ -104,23 +104,162 @@ def classify_file(path: Path) -> FileType | None:
     return None
 
 
+_PDF_DEFAULT_MAX_BYTES = 100 * 1024 * 1024              # 100 MB on disk
+_PDF_DEFAULT_MEMORY_CAP_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB virtual memory
+
+
+def _pdf_max_bytes() -> int:
+    raw = os.environ.get("GRAPHIFY_PDF_MAX_BYTES")
+    if not raw:
+        return _PDF_DEFAULT_MAX_BYTES
+    try:
+        value = int(raw)
+        return value if value > 0 else _PDF_DEFAULT_MAX_BYTES
+    except ValueError:
+        return _PDF_DEFAULT_MAX_BYTES
+
+
+def _pdf_memory_cap() -> int:
+    raw = os.environ.get("GRAPHIFY_PDF_MEMORY_CAP_BYTES")
+    if not raw:
+        return _PDF_DEFAULT_MEMORY_CAP_BYTES
+    try:
+        value = int(raw)
+        return value if value > 0 else _PDF_DEFAULT_MEMORY_CAP_BYTES
+    except ValueError:
+        return _PDF_DEFAULT_MEMORY_CAP_BYTES
+
+
+class _AddressSpaceCap:
+    """Context manager that lowers RLIMIT_AS for the duration on Unix.
+
+    On Windows (and any platform without ``resource``), this is a no-op —
+    documented in audit/office-pdf-hardening.md. The cap is enforced
+    process-wide for the duration; this is acceptable because graphify is a
+    single-purpose CLI that does no concurrent work outside the wrapped
+    parse, and the limit is high enough (default 2 GB) that legitimate
+    parser allocations are not affected.
+    """
+
+    def __init__(self, limit_bytes: int) -> None:
+        self.limit_bytes = limit_bytes
+        self._resource = None
+        self._original: tuple[int, int] | None = None
+
+    def __enter__(self) -> "_AddressSpaceCap":
+        try:
+            import resource  # type: ignore[import-not-found]
+        except ImportError:
+            return self
+        self._resource = resource
+        try:
+            soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+            self._original = (soft, hard)
+            if hard != resource.RLIM_INFINITY and hard < self.limit_bytes:
+                # Existing hard ceiling is already tighter — leave it alone.
+                return self
+            new_soft = self.limit_bytes
+            if soft != resource.RLIM_INFINITY and soft < new_soft:
+                # An even lower soft limit was already in effect; respect it.
+                new_soft = soft
+            resource.setrlimit(resource.RLIMIT_AS, (new_soft, hard))
+        except (ValueError, OSError):
+            # Some sandboxes refuse setrlimit; fall through without a cap
+            # rather than failing the parse outright.
+            self._resource = None
+        return self
+
+    def __exit__(self, *exc) -> None:
+        if self._resource is None or self._original is None:
+            return
+        try:
+            self._resource.setrlimit(self._resource.RLIMIT_AS, self._original)
+        except (ValueError, OSError):
+            pass
+
+
 def extract_pdf_text(path: Path) -> str:
-    """Extract plain text from a PDF file using pypdf."""
+    """Extract plain text from a PDF file using pypdf.
+
+    Hardening:
+      - Refuses files larger than GRAPHIFY_PDF_MAX_BYTES (default 100 MB).
+      - Caps virtual memory via RLIMIT_AS during parsing on Unix
+        (GRAPHIFY_PDF_MEMORY_CAP_BYTES, default 2 GB). Hostile PDFs with
+        deeply nested objects or decompression bombs hit a MemoryError
+        instead of exhausting the host. Windows lacks RLIMIT_AS; the
+        file-size check still applies.
+    """
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return ""
+    if size > _pdf_max_bytes():
+        return ""
     try:
         from pypdf import PdfReader
-        reader = PdfReader(str(path))
-        pages = []
-        for page in reader.pages:
-            text = page.extract_text()
-            if text:
-                pages.append(text)
-        return "\n".join(pages)
-    except Exception:
+        with _AddressSpaceCap(_pdf_memory_cap()):
+            reader = PdfReader(str(path))
+            pages = []
+            for page in reader.pages:
+                text = page.extract_text()
+                if text:
+                    pages.append(text)
+            return "\n".join(pages)
+    except (Exception, MemoryError):
         return ""
+
+
+_OFFICE_DEFAULT_MAX_UNCOMPRESSED_BYTES = 200 * 1024 * 1024  # 200 MB
+_OFFICE_DEFAULT_MAX_ENTRIES = 10_000
+
+
+def _office_max_uncompressed_bytes() -> int:
+    raw = os.environ.get("GRAPHIFY_OFFICE_MAX_UNCOMPRESSED_BYTES")
+    if not raw:
+        return _OFFICE_DEFAULT_MAX_UNCOMPRESSED_BYTES
+    try:
+        value = int(raw)
+        return value if value > 0 else _OFFICE_DEFAULT_MAX_UNCOMPRESSED_BYTES
+    except ValueError:
+        return _OFFICE_DEFAULT_MAX_UNCOMPRESSED_BYTES
+
+
+def _office_zip_is_safe(path: Path) -> bool:
+    """Return True if a .docx/.xlsx looks safe to hand to python-docx/openpyxl.
+
+    Reads the zip central directory only (no decompression) and rejects:
+      - non-zip files (malformed input the libraries will choke on anyway —
+        the helper just makes that decision before the library import),
+      - archives whose declared total uncompressed size exceeds the cap
+        (zip-bomb defence: stops a "42 KB on disk, 4 GB uncompressed"
+        pathology before lxml/openpyxl decompress anything),
+      - archives with an absurd number of entries (>10k by default).
+    Override the cap with GRAPHIFY_OFFICE_MAX_UNCOMPRESSED_BYTES.
+    """
+    import zipfile
+    try:
+        with zipfile.ZipFile(str(path)) as zf:
+            infos = zf.infolist()
+            if len(infos) > _OFFICE_DEFAULT_MAX_ENTRIES:
+                return False
+            cap = _office_max_uncompressed_bytes()
+            total = 0
+            for info in infos:
+                # file_size in the central directory is unsigned 32-bit, or
+                # unsigned 64-bit when zip64 is in use; both are honest about
+                # the *claimed* uncompressed size and that is what we cap.
+                total += info.file_size
+                if total > cap:
+                    return False
+        return True
+    except (zipfile.BadZipFile, OSError):
+        return False
 
 
 def docx_to_markdown(path: Path) -> str:
     """Convert a .docx file to markdown text using python-docx."""
+    if not _office_zip_is_safe(path):
+        return ""
     try:
         from docx import Document
         from docx.oxml.ns import qn
@@ -161,6 +300,8 @@ def docx_to_markdown(path: Path) -> str:
 
 def xlsx_to_markdown(path: Path) -> str:
     """Convert an .xlsx file to markdown text using openpyxl."""
+    if not _office_zip_is_safe(path):
+        return ""
     try:
         import openpyxl
         wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
